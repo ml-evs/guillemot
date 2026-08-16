@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import os
 import re
@@ -8,13 +9,18 @@ from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 from guillemot.tools import (
+    check_remote_topas_running,
     get_optimade_structures,
+    list_available_data,
     print_structure,
     print_structures,
     plot_refinement_results,
     run_topas_refinement,
+    run_topas_refinement_remote,
     save_topas_inp,
 )
+from guillemot.model import build_model, use_logfire
+from guillemot.session import copy_into_session, current_session, start_session
 from guillemot.tools.datalab import get_sample, get_samples, list_data_files
 from pydantic_ai import Agent, BinaryContent, ImageUrl
 from guillemot.utils import load_local_image
@@ -101,15 +107,35 @@ def extract_local_image_path(text: str) -> tuple[str, str]:
 def create_agent() -> Agent:
     """Create and configure the pydantic-ai agent"""
 
-    # Get model and API key from environment
+    # Get model and API key from environment. `build_model` adds retries for rate
+    # limiting (HTTP 429), which would otherwise abort the run mid-refinement.
     model_name = os.getenv("GUILLEMOT_AI_MODEL", "gemini-2.5-flash-lite")
+    model = build_model(model_name)
+
+    # One working directory per conversation, so this refinement's files stay together
+    # and cannot be mixed up with an earlier one's.
+    session = start_session()
 
     with open("examples/NaCoO2/example_refinement_NaCoO2.inp", "r") as f:
         topas_example = f.read()
 
+    remote_host = os.getenv("GUILLEMOT_TOPAS_SSH_HOST")
+    if remote_host:
+        execution_prompt = f"""TOPAS is not installed locally: it runs on the remote machine
+'{remote_host}' over SSH. Always use `run_topas_refinement_remote` to run refinements, never
+`run_topas_refinement`. That tool refuses to start if TOPAS is already busy on the remote machine;
+you can check that yourself with `check_remote_topas_running`. Each remote run gets its own run
+directory which is copied back locally, so the paths in the result refer to the local copies.
+TOPAS runs with that directory as its working directory, so every filename in the .inp file —
+the data files it reads and the names given to the Out_* macros — should be a bare filename with
+no directory part."""
+    else:
+        execution_prompt = """TOPAS runs on this machine, so use `run_topas_refinement` to run
+refinements."""
+
     # Create the agent with tools
     agent = Agent(
-        model_name,
+        model,
         system_prompt=f"""You are an agent responsible for performing Rietveld refinements using
  the topas-academic program. You have access to a tool to write topas .inp files to a run directory,
  and a tool to run the refinement and get the results. You perform Rietveld refinements the way
@@ -127,8 +153,12 @@ via OPTIMADE. These searches will typically return a table of structures matchin
 Here is an example of a topas input file for refinement of a sample of NaCoO2: {topas_example}
     """,
         tools=[
+            list_available_data,
+            copy_into_session,
             save_topas_inp,
             run_topas_refinement,
+            run_topas_refinement_remote,
+            check_remote_topas_running,
             get_optimade_structures,
             print_structure,
             print_structures,
@@ -157,6 +187,9 @@ async def chat_loop():
     print("=" * 40)
 
     agent = create_agent()
+    session = current_session()
+    if session is not None:
+        print(f"📁 Session directory: {session.directory}")
 
     while True:
         try:
@@ -253,14 +286,88 @@ async def chat_loop():
             print("Please try again or type 'quit' to exit.")
 
 
-async def main():
+def build_task(
+    pattern: str, elements: list[str] | None = None, notes: str | None = None
+) -> str:
+    """Write the instruction for a one-shot refinement started from the command line."""
+    task = [
+        f"Refine the diffraction pattern in the file `{pattern}`.",
+        "Work through it end to end without asking me anything: copy the pattern into "
+        "the session directory, write a TOPAS input file for it, run the refinement, "
+        "and then tell me the Rwp and what you would try next.",
+    ]
+    if elements:
+        task.insert(1, f"The sample is believed to contain: {', '.join(elements)}.")
+    else:
+        task.insert(
+            1,
+            "I have not told you the composition, so work out what you can from the "
+            "filename; if you genuinely cannot, say so instead of guessing.",
+        )
+    if notes:
+        task.append(f"Additional context from me: {notes}")
+    return "\n".join(task)
+
+
+async def run_once(
+    pattern: str, elements: list[str] | None = None, notes: str | None = None
+) -> str:
+    """Run a single refinement from the command line and print the result."""
+    agent = create_agent()
+    session = current_session()
+
+    print("🪶 Guillemot")
+    print(f"📁 Session directory: {session.directory if session else 'run_dir'}")
+    print(f"📈 Pattern: {pattern}")
+    print(f"🧪 Elements: {', '.join(elements) if elements else 'not given'}")
+    print("=" * 60)
+
+    result = await agent.run(build_task(pattern, elements, notes))
+    print(result.output)
+    print("=" * 60)
+    if session is not None:
+        print(f"📁 Everything from this run is in {session.directory}")
+    return result.output
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="guillemot",
+        description=(
+            "Run TOPAS Rietveld refinements with an LLM agent. With no arguments, "
+            "starts an interactive chat; give --pattern to run one refinement and exit."
+        ),
+    )
+    parser.add_argument(
+        "--pattern",
+        help="path to the diffraction pattern to refine, e.g. examples/HL2-1/HL2-1_2.xy",
+    )
+    parser.add_argument(
+        "--elements",
+        help="comma-separated elements believed to be present, e.g. Ag,Cu,Pd",
+    )
+    parser.add_argument(
+        "--notes", help="anything else the agent should know about the sample"
+    )
+    return parser.parse_args(argv)
+
+
+async def main(args: argparse.Namespace) -> None:
     """Main entry point"""
     try:
-        await chat_loop()
+        if args.pattern:
+            elements = (
+                [e.strip() for e in args.elements.split(",") if e.strip()]
+                if args.elements
+                else None
+            )
+            await run_once(args.pattern, elements, args.notes)
+        else:
+            await chat_loop()
     except Exception as e:
-        print(f"❌ Failed to start chat application: {e}")
-        print("Please check your .env file and ensure GEMINI_API_KEY is set correctly.")
+        print(f"❌ Failed to run guillemot: {e}")
+        print("Check your .env file: GUILLEMOT_AI_MODEL and the matching API key.")
 
 
 def launch():
-    asyncio.run(main())
+    asyncio.run(main(parse_args()))
