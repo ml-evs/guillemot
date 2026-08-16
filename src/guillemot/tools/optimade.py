@@ -147,7 +147,7 @@ def print_structures(structures: list[dict]) -> str:
     table.add_column("Disordered?")
 
     for ind, s in enumerate(structures):
-        s = Structure(s).as_pmg
+        s = Structure(s).as_pymatgen
 
         try:
             spacegroup = s.get_symmetry_dataset()["international"]
@@ -182,6 +182,6 @@ def print_structure(structure: dict) -> str:
         structure: An optimade Structure object.
 
     """
-    pmg = Structure(structure).as_pmg
+    pmg = Structure(structure).as_pymatgen
     print(pmg)
     return str(pmg)
