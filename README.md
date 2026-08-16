@@ -13,26 +13,75 @@ LLM and AI-assisted explorations into fitting of experimental diffraction data, 
 
 ## Setup
 
-1. Ensure you have [`uv`](https://astral.sh/uv) installed
-2. Install dependencies:
+1. Install [`uv`](https://astral.sh/uv), then the dependencies:
+
    ```bash
    uv sync --all-extras --dev
    ```
 
-3. Set up your environment variables in `.env`:
+2. Create a `.env` file with a model and its API key:
+
    ```bash
-   AI_MODEL=google-gla:gemini-2.5-flash-lite
+   GUILLEMOT_AI_MODEL=google-gla:gemini-2.5-flash-lite
    GEMINI_API_KEY=your_api_key_here
    ```
 
-## Usage
+3. Tell it where TOPAS lives — see [Running TOPAS over SSH](#running-topas-over-ssh).
+
+## End-to-end example
+
+One refinement, start to finish, without a conversation:
+
+```bash
+uv run guillemot --pattern examples/KD1-2_5_NaCoO2/KD1-2_5-90_30min.xy --elements Na,Co,O
+```
+
+```
+🪶 Guillemot
+📁 Session directory: run_dir/20260816-182534-4153a2
+📈 Pattern: examples/KD1-2_5_NaCoO2/KD1-2_5-90_30min.xy
+🧪 Elements: Na, Co, O
+============================================================
+Found 13 structures with elements=['Na', 'Co', 'O'] in database='cod'
+Full Formula (Na1.56 Co2 O4) ...
+▶ running TOPAS on topas-vm1 in C:\Users\Group_User\guillemot\KD1-2_5_NaCoO2_20260816_182553
+TOPAS-64 Version 6 (c) 1992-2016 Alan A. Coelho
+   ...
+File KD1-2_5_NaCoO2_output.txt written to.
+```
+
+Afterwards everything from that run is in one directory:
+
+```
+run_dir/20260816-182534-4153a2/
+├── KD1-2_5-90_30min.xy              # the pattern, copied in
+├── KD1-2_5_NaCoO2.inp               # what the agent wrote
+└── KD1-2_5_NaCoO2_20260816_182553/  # synced back from the TOPAS machine
+    ├── KD1-2_5_NaCoO2.out
+    ├── KD1-2_5_NaCoO2_output.txt
+    ├── KD1-2_5_NaCoO2_plot.png
+    └── KD1-2_5_NaCoO2_riet_01.cif
+```
+
+`--elements` is how you say what you think is in the sample. Leave it out and the agent will
+try to read the composition off the filename, and tell you if it can't rather than guessing.
+`--notes` passes anything else along ("measured on a Co source", "should be single phase").
 
 Run the chat application:
 ```bash
 uv run guillemot
 ```
 
-### Functionality
+## Running TOPAS over SSH
+
+TOPAS usually lives on a separate Windows machine. Point guillemot at it in `.env`:
+
+```bash
+GUILLEMOT_TOPAS_SSH_HOST=user@topas-pc              # or a ~/.ssh/config host alias
+GUILLEMOT_TOPAS_EXE='C:\Science\Topas-7\tc.exe'     # remote path to the TOPAS console exe
+GUILLEMOT_TOPAS_REMOTE_DIR='C:\guillemot_runs'      # remote directory for run directories
+GUILLEMOT_TOPAS_SSH_PORT=22                         # optional, only if non-standard
+```
 
  Given experimental X-ray diffraction data, guillemot will set up and run TOPAS refinements using a natural-language interface. Guillemot uses multimodal image input to inspect refinement outputs, and has tools for retrieving structural information from OPTIMADE providers and outputting refinement plots to images.
 
