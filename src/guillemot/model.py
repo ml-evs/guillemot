@@ -20,24 +20,9 @@ from pydantic_ai.models import Model
 
 logger = logging.getLogger(__name__)
 
-# Set by the application once logfire has been configured, so failed model calls are
-# reported alongside the agent run spans rather than into a separate log.
-_logfire_enabled = False
-
-
-def use_logfire(enabled: bool = True) -> None:
-    """Send failure reports to logfire instead of the standard library logger."""
-    global _logfire_enabled
-    _logfire_enabled = enabled
-
 
 def _warn(message: str, **attributes) -> None:
-    if _logfire_enabled:
-        import logfire
-
-        logfire.warning(message, **attributes)
-    else:
-        logger.warning("%s %s", message, attributes)
+    logger.warning("%s %s", message, attributes)
 
 
 DEFAULT_ATTEMPTS = 5

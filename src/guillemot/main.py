@@ -19,7 +19,7 @@ from guillemot.tools import (
     run_topas_refinement_remote,
     save_topas_inp,
 )
-from guillemot.model import build_model, use_logfire
+from guillemot.model import build_model
 from guillemot.session import copy_into_session, current_session, start_session
 from guillemot.tools.datalab import get_sample, get_samples, list_data_files
 from pydantic_ai import Agent, BinaryContent, ImageUrl
