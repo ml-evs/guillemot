@@ -362,6 +362,11 @@ def check_remote_topas_running(timeout_s: int = 30) -> TopasProcessStatus:
         raise ModelRetry(
             f"Timed out after {timeout_s}s checking for running TOPAS processes on {config.host}."
         )
+    elif returncode == 255:
+        raise RuntimeError(
+            f"Could not connect to {config.host} to check for running TOPAS processes. "
+            f"stdout: {stdout} stderr: {stderr}"
+        )
     if returncode != 0:
         raise ModelRetry(
             f"Could not query processes on {config.host} (exit {returncode}). "
