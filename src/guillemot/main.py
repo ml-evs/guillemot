@@ -156,7 +156,7 @@ Here is an example of a topas input file for refinement of a sample of NaCoO2: {
             list_available_data,
             copy_into_session,
             save_topas_inp,
-            run_topas_refinement,
+            # run_topas_refinement,
             run_topas_refinement_remote,
             check_remote_topas_running,
             get_optimade_structures,
