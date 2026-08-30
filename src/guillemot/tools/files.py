@@ -17,9 +17,8 @@ STRUCTURE_SUFFIXES = {".cif"}
 INPUT_SUFFIXES = {".inp"}
 RESULT_SUFFIXES = {".out", ".png"}
 
-# Every directory the project keeps data in: downloaded sample data, refinement runs,
-# the worked examples shipped with the repo, and structures.
-SEARCH_DIRS = ("data", "run_dir", "examples", "cifs")
+# The shared directories the agent may look in: downloaded sample data and structures.
+SEARCH_DIRS = ("data", "cifs")
 
 
 class DataFile(BaseModel):
@@ -78,8 +77,8 @@ def list_available_data() -> DataInventory:
     lives. Every path returned is relative to the working directory and can be passed
     straight to `inspect_xrd_pattern`, `save_topas_inp` or the refinement tools.
 
-    Covers `data/<sample_id>/` (downloaded from datalab), `run_dir/` (this and previous
-    sessions), `examples/` (worked refinements shipped with the project) and `cifs/`.
+    Covers `data/<sample_id>/` (downloaded from datalab), `cifs/`, and this session's
+    own directory. Other sessions' directories are not visible.
 
     This is not the only way to reach a file: if the user gives you a path, pass it
     straight to the tool that needs it. Only say a file is missing if that tool reports
@@ -90,7 +89,7 @@ def list_available_data() -> DataInventory:
         working_directory=os.getcwd(), session_directory=str(session)
     )
 
-    for directory in SEARCH_DIRS:
+    for directory in (*SEARCH_DIRS, session):
         root = pathlib.Path(directory)
         if not root.is_dir():
             continue
