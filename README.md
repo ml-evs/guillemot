@@ -97,6 +97,13 @@ GUILLEMOT_TOPAS_SSH_PORT=22                         # optional, only if non-stan
 - `plot_refinement_results` — Plot observed vs calculated pattern and residuals, optionally annotate HKL ticks, save PNG, and return the image filepath and binary content.
 - `get_sample` and `get_samples` — Download sample metadata from the configured [*datalab*](https://datalab-org.io) to find uploaded XRD patterns.
 
+## Tracing
+
+Each run is instrumented with [Logfire](https://logfire.pydantic.dev). 
+Each session has its log written to `trace.jsonl` in that session's directory, one JSON object per line, so the record of
+what the agent did sits alongside the .inp files and plots it produced. 
+Setting `LOGFIRE_TOKEN` additionally sends the same spans to the Logfire dashboard for nicer visualisation.
+
 ## License
 
 This hackathon project is released under the terms of the permissive MIT License - see [LICENSE](LICENSE) file for details.
