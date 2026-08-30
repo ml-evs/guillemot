@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "logfire>=4.6.0",
-    "pydantic-ai>=1.0.3",
+    "pydantic-ai>=1.0.4,<2",
     "python-dotenv>=1.1.1",
     "optimade[http-client,cif,pymatgen]",
     "matplotlib>=3.10.6",
