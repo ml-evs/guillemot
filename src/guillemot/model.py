@@ -200,6 +200,82 @@ def _ollama_model(model_id: str, settings: RetrySettings) -> Model:
     )
 
 
+def build_model_settings(model_name: str):
+    """Ask the model to show its reasoning, for the providers that can.
+
+    Gemini hides its thoughts unless `include_thoughts` is set, so the chat loop would
+    have nothing to print. The reasoning still costs tokens either way — this only
+    decides whether we get to see it.
+
+    Returns None for providers where the reasoning is not available to us: OpenAI's
+    chat completions API does not return it, and ollama models vary. The chat loop
+    simply shows no thinking in that case.
+    """
+    provider, _, model_id = model_name.partition(":")
+    if not model_id:
+        provider = "google-gla"
+
+    if provider in ("google-gla", "google-vertex"):
+        from pydantic_ai.models.google import GoogleModelSettings
+
+        return GoogleModelSettings(google_thinking_config={"include_thoughts": True})
+
+    return None
+
+
+def _ollama_context_limit(model_id: str) -> int | None:
+    """Ask the ollama server how much context the model can hold.
+
+    A loaded model reports the window it was actually loaded with, which is the number
+    that matters and may be smaller than the architecture's maximum; falling back to
+    `/api/show` gives that maximum for a model that is not currently loaded. Returns
+    None if the server cannot be reached or says nothing useful — an unavailable meter
+    is not worth failing a run over.
+    """
+    import httpx
+
+    base = os.getenv("GUILLEMOT_OLLAMA_URL", DEFAULT_OLLAMA_URL).removesuffix("/v1")
+    try:
+        with httpx.Client(base_url=base, timeout=5) as client:
+            loaded = client.get("/api/ps").json()
+            for model in loaded.get("models", []):
+                if model.get("model") == model_id and model.get("context_length"):
+                    return int(model["context_length"])
+
+            info = client.post("/api/show", json={"model": model_id}).json()
+            for key, value in (info.get("model_info") or {}).items():
+                if key.endswith(".context_length"):
+                    return int(value)
+    except Exception:
+        return None
+    return None
+
+
+def context_limit(model_name: str) -> int | None:
+    """How many tokens of context the model can hold, for the fullness meter.
+
+    `GUILLEMOT_CONTEXT_LIMIT` overrides everything, which is the escape hatch when a
+    provider's real limit is not what we assume — a model served with a smaller window
+    than it was trained for, most obviously. Returns None when we have no honest
+    number, and the meter then reports tokens without a percentage rather than
+    inventing a denominator.
+    """
+    override = os.getenv("GUILLEMOT_CONTEXT_LIMIT")
+    if override:
+        return int(override)
+
+    provider, _, model_id = model_name.partition(":")
+    if not model_id:
+        provider, model_id = "google-gla", model_name
+
+    if provider == "ollama":
+        return _ollama_context_limit(model_id)
+    if provider in ("google-gla", "google-vertex") and model_id.startswith("gemini-"):
+        return 1_048_576  # the 1M window of the 1.5/2.x Gemini models
+
+    return None
+
+
 def build_model(model_name: str) -> Model | str:
     """Build the configured model with rate-limit retries where we know how.
 

@@ -1,11 +1,6 @@
 import argparse
 import asyncio
 import os
-import re
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 from guillemot.tools import (
@@ -19,79 +14,29 @@ from guillemot.tools import (
     run_topas_refinement_remote,
     save_topas_inp,
 )
-from guillemot.model import build_model
+from guillemot.model import build_model, build_model_settings, context_limit
 from guillemot.session import copy_into_session, current_session, start_session
+from guillemot.streaming import run_and_show
 from guillemot.tracing import configure_tracing
 from guillemot.tools.datalab import get_sample, get_samples, list_data_files
-from pydantic_ai import Agent, BinaryContent, ImageUrl
-from guillemot.utils import load_local_image
+from pydantic_ai import Agent
+from guillemot.utils import (
+    ConversationHistory,
+    extract_local_image_path,
+    is_local_image_path,
+    load_local_image,
+)
 
 # Load environment variables
 load_dotenv()
 
 
-@dataclass
-class ConversationHistory:
-    """Store conversation history for memory"""
-
-    messages: List[Dict[str, Any]]
-
-    def add_message(
-        self,
-        role: str,
-        content: str,
-        has_image: bool = False,
-        timestamp: datetime | None = None,
-    ):
-        if timestamp is None:
-            timestamp = datetime.now()
-        self.messages.append(
-            {
-                "role": role,
-                "content": content,
-                "has_image": has_image,
-                "timestamp": timestamp.isoformat(),
-            }
-        )
-
-    def get_recent_messages(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get the most recent messages for context"""
-        return self.messages[-limit:]
-
-    def get_formatted_history(self, limit: int = 5) -> str:
-        """Format recent conversation history for the AI context"""
-        recent = self.get_recent_messages(limit)
-        formatted = []
-        for msg in recent:
-            content = msg["content"]
-            if msg.get("has_image", False):
-                content += " [included an image]"
-            formatted.append(f"{msg['role']}: {content}")
-        return "\n".join(formatted)
-
-
 # Initialize conversation history
 conversation_history = ConversationHistory(messages=[])
 
-
-def is_local_image_path(text: str) -> bool:
-    """Check if text contains a local image file path"""
-    # Look for file:// URLs or local paths ending with image extensions
-    file_pattern = r"(?:file://)?[^\s]+\.(jpg|jpeg|png|gif|bmp|webp)"
-    return bool(re.search(file_pattern, text, re.IGNORECASE))
-
-
-def extract_local_image_path(text: str) -> tuple[str, str]:
-    """Extract local image path from text and return (text_without_path, image_path)"""
-    file_pattern = r"(?:file://)?([^\s]+\.(jpg|jpeg|png|gif|bmp|webp))"
-    match = re.search(file_pattern, text, re.IGNORECASE)
-    if match:
-        image_path = match.group(1)
-        # Remove file:// prefix if present
-        image_path = image_path.replace("file://", "")
-        text_without_path = text.replace(match.group(), "").strip()
-        return text_without_path, image_path
-    return text, ""
+# How much context the configured model can hold, filled in once the model is known.
+# None when we have no trustworthy number, in which case the meter shows tokens only.
+CONTEXT_LIMIT: int | None = None
 
 
 # Set up the pydantic-ai agent
@@ -102,6 +47,12 @@ def create_agent() -> Agent:
     # limiting (HTTP 429), which would otherwise abort the run mid-refinement.
     model_name = os.getenv("GUILLEMOT_AI_MODEL", "gemini-2.5-flash-lite")
     model = build_model(model_name)
+    # Without this the model's reasoning never reaches us, and there is nothing for the
+    # chat loop to show while it works.
+    model_settings = build_model_settings(model_name)
+
+    global CONTEXT_LIMIT
+    CONTEXT_LIMIT = context_limit(model_name)
 
     # One working directory per conversation, so this refinement's files stay together
     # and cannot be mixed up with an earlier one's. The trace of the run is written
@@ -143,6 +94,8 @@ and explaining why you made changes before the next refinement.
 If the user does not provide a CIF, you can search in the Materials Project or Crystallography Open Database
 via OPTIMADE. These searches will typically return a table of structures matching the query, which can be printed with `print_structures`. You can then print the most promising structures with `print_structure` and use the info to construct your TOPAS input.
 
+{execution_prompt}
+
 Here is an example of a topas input file for refinement of a sample of NaCoO2: {topas_example}
     """,
         tools=[
@@ -160,6 +113,7 @@ Here is an example of a topas input file for refinement of a sample of NaCoO2: {
             get_sample,
             list_data_files,
         ],
+        model_settings=model_settings,
         instrument=True,
         retries=5,
     )
@@ -259,13 +213,10 @@ async def chat_loop():
                 """
                 agent_message = full_prompt
 
-            print("\n🤖 Assistant: ", end="", flush=True)
+            # Run the agent, showing its reasoning while it works
+            response_text = await run_and_show(agent, agent_message, CONTEXT_LIMIT)
 
-            # Run the agent
-            result = await agent.run(agent_message)
-
-            # Print the response
-            response_text = result.output
+            print("🤖 Assistant: ", end="", flush=True)
             print(response_text)
 
             # Add assistant response to history
@@ -315,12 +266,14 @@ async def run_once(
     print(f"🧪 Elements: {', '.join(elements) if elements else 'not given'}")
     print("=" * 60)
 
-    result = await agent.run(build_task(pattern, elements, notes))
-    print(result.output)
+    output = await run_and_show(
+        agent, build_task(pattern, elements, notes), CONTEXT_LIMIT
+    )
+    print(output)
     print("=" * 60)
     if session is not None:
         print(f"📁 Everything from this run is in {session.directory}")
-    return result.output
+    return output
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
