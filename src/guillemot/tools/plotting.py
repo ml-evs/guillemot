@@ -4,40 +4,33 @@ import matplotlib
 import matplotlib.pyplot as plt
 import pandas as pd
 from guillemot.utils import load_local_image
-from pydantic import BaseModel, field_serializer
-from pydantic_ai import BinaryContent
-import base64
+from pydantic import BaseModel
+from pydantic_ai import ToolReturn
 
 matplotlib.use("Agg")  # Use a non-interactive backend to not crash agent
 
 
 class PlotResultsOutput(BaseModel):
+    """What the agent gets back in the tool result: the path, not the pixels.
+
+    The image itself travels alongside this, as the `content` of a `ToolReturn`, so
+    that the model receives it as an image rather than as a wall of base64 text.
+    """
+
     output_filepath: str
-    output_image: BinaryContent
-
-    @field_serializer("output_image")
-    def serialize_binarycontent(self, bc: BinaryContent) -> dict:
-        return {
-            "data": base64.b64encode(bc.data).decode("ascii"),
-            "media_type": bc.media_type,
-        }
 
 
-def plot_refinement_results(
+def render_refinement_plot(
     output_file: str,
     save_path: str,
     hkl_file: Optional[str] = None,
     x_range: list[float] | None = None,
-) -> PlotResultsOutput:
-    """
-    A tool that plots the results of a TOPAS refinement from the refinement output file and generates a PNG image.
-    Parameters:
-        output_file: Path to the TOPAS refinement output file (e.g., "output.txt").
-        save_path: Path to save the generated PNG image (e.g., "refinement_plot.png").
-        hkl_file: Optional path to the HKL file containing reflection data for tick marks (e.g., "hkl.txt").
-        x_range: Optional tuple specifying the x-axis range to zoom in on (e.g., (20, 50)).
-    Returns:
-        PlotResultsOutput containing the path to the saved image and the image content.
+) -> str:
+    """Draw the observed/calculated/difference plot and save it. Returns `save_path`.
+
+    This is the plotting itself, with no model-facing content attached: callers that
+    only want the PNG on disk (a finished refinement, say) use this, while
+    `plot_refinement_results` wraps it for the agent.
     """
 
     # ---- Load total pattern ----
@@ -120,6 +113,8 @@ def plot_refinement_results(
         handles.append(proxy)
         labels.append("hkl ticks")
         ax_main.legend(handles, labels)
+    else:
+        ax_main.legend()
 
     ax_main.set_ylabel("Intensity")
     # Adjust ylim to provide a buffer for the highest label
@@ -147,16 +142,48 @@ def plot_refinement_results(
     plt.savefig(save_path, dpi=100, bbox_inches="tight")
     plt.close(fig)  # ensure no GUI resources are kept
 
-    out = PlotResultsOutput(
-        output_filepath=save_path, output_image=load_local_image(save_path)
+    return save_path
+
+
+def plot_refinement_results(
+    output_file: str,
+    save_path: str,
+    hkl_file: Optional[str] = None,
+    x_range: list[float] | None = None,
+) -> ToolReturn:
+    """
+    A tool that plots the results of a TOPAS refinement and shows you the resulting image.
+    Call this when you want to look at a fit: after a refinement, or again with a
+    narrower `x_range` to zoom in on a region whose residual you cannot judge at full
+    scale.
+    Parameters:
+        output_file: Path to the TOPAS refinement output file (e.g., "output.txt").
+        save_path: Path to save the generated PNG image (e.g., "refinement_plot.png").
+        hkl_file: Optional path to the HKL file containing reflection data for tick marks (e.g., "hkl.txt").
+        x_range: Optional tuple specifying the x-axis range to zoom in on (e.g., (20, 50)).
+    Returns:
+        The path to the saved image, plus the image itself for you to look at.
+    """
+    render_refinement_plot(
+        output_file=output_file,
+        save_path=save_path,
+        hkl_file=hkl_file,
+        x_range=x_range,
     )
 
-    return out
+    image = load_local_image(save_path)
+    return ToolReturn(
+        return_value=PlotResultsOutput(output_filepath=save_path),
+        # `content` reaches the model as a genuine image part. Returning the
+        # BinaryContent inside `return_value` instead would serialise it to base64 and
+        # the model would see tens of thousands of tokens of text it cannot read.
+        content=[image] if image is not None else [],
+    )
 
 
 # Example usage:
 if __name__ == "__main__":
-    plot_refinement_results(
+    render_refinement_plot(
         output_file="examples/FeSb_19RBM/Runs/1/output.txt",
         save_path="test_plot.png",
         hkl_file="examples/FeSb_19RBM/Runs/1/hkl.txt",
