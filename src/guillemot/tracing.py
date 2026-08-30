@@ -77,3 +77,26 @@ def configure_tracing() -> Optional[SessionFileSpanExporter]:
         additional_span_processors=[SimpleSpanProcessor(exporter)],
     )
     return exporter
+
+
+def record_context_usage(used: int, limit: int | None) -> None:
+    """Record how full the context window is, as a logfire span of its own.
+
+    The `chat` spans carry `gen_ai.usage.input_tokens`, but a raw token count says
+    nothing about how close the run is to the window it has to fit in — which is the
+    thing worth watching, since the prompt is re-sent and re-read on every request.
+    """
+    try:
+        import logfire
+    except ImportError:
+        return
+
+    if limit:
+        logfire.info(
+            "context {used}/{limit} tokens ({fraction:.0%} full)",
+            used=used,
+            limit=limit,
+            fraction=used / limit,
+        )
+    else:
+        logfire.info("context {used} tokens", used=used, limit=None)
