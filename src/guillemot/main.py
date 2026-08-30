@@ -21,22 +21,13 @@ from guillemot.tools import (
 )
 from guillemot.model import build_model
 from guillemot.session import copy_into_session, current_session, start_session
+from guillemot.tracing import configure_tracing
 from guillemot.tools.datalab import get_sample, get_samples, list_data_files
 from pydantic_ai import Agent, BinaryContent, ImageUrl
 from guillemot.utils import load_local_image
 
 # Load environment variables
 load_dotenv()
-
-# Configure Logfire if token is available
-try:
-    import logfire
-
-    logfire_token = os.getenv("LOGFIRE_TOKEN")
-    if logfire_token:
-        logfire.configure(token=logfire_token)
-except ImportError:
-    pass  # Logfire is optional
 
 
 @dataclass
@@ -113,8 +104,10 @@ def create_agent() -> Agent:
     model = build_model(model_name)
 
     # One working directory per conversation, so this refinement's files stay together
-    # and cannot be mixed up with an earlier one's.
+    # and cannot be mixed up with an earlier one's. The trace of the run is written
+    # there too, so what the agent did is kept with what it produced.
     session = start_session()
+    configure_tracing()
 
     with open("examples/NaCoO2/example_refinement_NaCoO2.inp", "r") as f:
         topas_example = f.read()
