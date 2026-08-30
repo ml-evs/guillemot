@@ -12,7 +12,7 @@ from os.path import join
 from typing import Optional
 
 from guillemot.session import session_dir
-from guillemot.tools.plotting import PlotResultsOutput, plot_refinement_results
+from guillemot.tools.plotting import render_refinement_plot
 from pydantic import BaseModel, Field, field_validator
 from pydantic_ai.exceptions import ModelRetry
 
@@ -91,12 +91,15 @@ class RunRefinementResult(BaseModel):
     outfile_contents: Optional[str]
     refinement_result_path: Optional[str]
     logs_tail: Optional[str]
-    plot_results: Optional[PlotResultsOutput]
+    plot_path: Optional[str]
     # aux_files: list[str] = Field(default_factory=list)  # any xy/csv exports found
 
 
 def _collect_refinement_outputs(inp_path: str) -> dict:
     """Gather the output files that TOPAS leaves next to ``inp_path`` and plot them.
+
+    The plot is written to disk but not returned as an image: see the note at
+    ``plot_path`` below.
 
     ``inp_path`` is a *local* path: for remote runs this points at the copy of the
     input inside the synced-back run directory.
@@ -119,19 +122,22 @@ def _collect_refinement_outputs(inp_path: str) -> dict:
     if not os.path.isfile(hkl_file):
         hkl_file = None
 
-    # Only plot if the result file exists
-    plot_results = None
+    # Draw the fit and leave the PNG next to the rest of the run, but hand back only
+    # its path: the image goes to the model when it asks for it with
+    # `plot_refinement_results`, not unbidden on the back of every refinement.
+    plot_path = None
     if refinement_result_path is not None:
-        save_path = refinement_result_path.replace("_output.txt", "_plot.png")
-        plot_results = plot_refinement_results(
-            output_file=refinement_result_path, save_path=save_path, hkl_file=hkl_file
+        plot_path = render_refinement_plot(
+            output_file=refinement_result_path,
+            save_path=refinement_result_path.replace("_output.txt", "_plot.png"),
+            hkl_file=hkl_file,
         )
 
     return {
         "outfile_path": outfile_path,
         "outfile_contents": outfile_contents,
         "refinement_result_path": refinement_result_path,
-        "plot_results": plot_results,
+        "plot_path": plot_path,
     }
 
 
@@ -482,6 +488,10 @@ def run_topas_refinement_remote(
     every data file it references into a fresh timestamped run directory on the remote
     machine, runs TOPAS there while streaming its output, then syncs the whole run
     directory back locally and plots the result.
+
+    The plot of the fit is saved to `plot_path` in the returned result, but is not shown
+    to you here. To look at it, call `plot_refinement_results` with the returned
+    `refinement_result_path` and `plot_path`.
 
     All remote writes are confined to a per-run subdirectory of the configured remote
     workspace, so every filename in the .inp file — the data files it reads and the

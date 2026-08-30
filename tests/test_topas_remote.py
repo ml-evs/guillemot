@@ -222,7 +222,9 @@ def test_run_remote_success(remote):
     local_run_dir = pathlib.Path(result.local_run_dir)
     assert local_run_dir.parent.name == "run_dir"
     assert (local_run_dir / "KD1_plot.png").is_file()
-    assert result.plot_results is not None
+    # The plot is on disk and named in the result, but the image itself is not sent to
+    # the model here — it only travels with a `plot_refinement_results` call.
+    assert result.plot_path == str(local_run_dir / "KD1_plot.png")
     assert result.outfile_contents is not None
     assert result.refinement_result_path == str(local_run_dir / "KD1_output.txt")
 
