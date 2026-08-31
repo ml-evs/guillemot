@@ -42,6 +42,80 @@ def _check_safe_filename(name: str, what: str = "filename") -> str:
     return name
 
 
+# TOPAS reports a parse failure as a line number plus the token it choked on, e.g.
+#
+#     *** Error loading sstring_in
+#         at LINE 42
+#     *** Error at: 1.0E-4
+#
+# Neither half is reliable on its own. The line number is where the parser gave up,
+# which may be the line *after* the mistake: `scale @ 1.0E-4` written on line 41 was
+# reported as line 42, while `Phase_Density_g_on_cm3( @ ... )` on line 43 was reported
+# exactly. So the agent gets a window around the reported line with the token named,
+# rather than a single line asserted to be the culprit — it has no other way to see
+# the file it wrote, and counting lines from memory is how the last session misread
+# one of these and wasted a whole remote run on the wrong fix.
+TOPAS_ERROR_LINE_RE = re.compile(r"^\s*at LINE\s+(\d+)", re.MULTILINE)
+TOPAS_ERROR_TOKEN_RE = re.compile(r"^\s*\*\*\* Error at:\s*(\S.*?)\s*$", re.MULTILINE)
+
+
+def _read_text(path) -> str:
+    """The .inp as text, or "" if it cannot be read — never a reason to fail harder."""
+    try:
+        return pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _inp_excerpt(inp_text: str, topas_output: str, name: str, context: int = 5) -> str:
+    """Quote the lines of an .inp around the parse error TOPAS reported, if it did.
+
+    Returns "" when the output carries no line number — a refinement can fail for
+    reasons that have nothing to do with the file's syntax, and a misleading excerpt
+    would be worse than none.
+    """
+    match = TOPAS_ERROR_LINE_RE.search(topas_output)
+    if not match:
+        return ""
+
+    lines = inp_text.splitlines()
+    reported = int(match.group(1))
+    if not 1 <= reported <= len(lines):
+        return ""
+
+    token_match = TOPAS_ERROR_TOKEN_RE.search(topas_output)
+    token = token_match.group(1) if token_match else None
+    # A one-character token like `@` occurs on half the lines in a typical .inp, so it
+    # is worth naming but not worth marking.
+    markable = token if token and len(token) > 1 else None
+
+    first = max(1, reported - context)
+    last = min(len(lines), reported + context)
+    width = len(str(last))
+
+    quoted = []
+    for number in range(first, last + 1):
+        line = lines[number - 1]
+        if number == reported:
+            marker = ">"
+        elif markable and markable in line:
+            marker = "*"
+        else:
+            marker = " "
+        quoted.append(f" {marker} {number:>{width}} | {line}")
+
+    header = f"TOPAS stopped parsing {name} at line {reported}"
+    if token:
+        header += f", on the token `{token}`"
+    header += (
+        ". That is where its parser gave up, so the mistake is on that line or just "
+        "before it"
+    )
+    header += " (marked *):" if markable else ":"
+
+    return f"\n\n{header}\n\n" + "\n".join(quoted)
+
+
 class SaveInpResult(BaseModel):
     inp_path: str
     line_count: int
@@ -167,9 +241,13 @@ def run_topas_refinement(inp_path: str, timeout_s: int = 60) -> RunRefinementRes
         status = "failure"
 
     if status == "failure":
+        excerpt = _inp_excerpt(
+            _read_text(inp_path), f"{stdout}\n{stderr}", os.path.basename(inp_path)
+        )
         raise ModelRetry(
             f"TOPAS did not produce a refinement result (exit {returncode}). "
-            f"Its output was:\n{stdout}\n{stderr}\nFix the .inp and try again."
+            f"Its output was:\n{stdout}\n{stderr}{excerpt}\n\n"
+            "Fix the .inp and try again."
         )
 
     # todo: add tail of log file located at \Science\Topas-7\topas.log
@@ -617,9 +695,17 @@ def run_topas_refinement_remote(
         run_status = "failure"
 
     if run_status == "failure":
+        # Quote from the copy that came back, which is byte-for-byte what TOPAS parsed
+        # and so is numbered the way its error message is.
+        excerpt = _inp_excerpt(
+            _read_text(local_run_dir / local_inp.name) or _read_text(local_inp),
+            f"{run_stdout}\n{run_stderr}",
+            local_inp.name,
+        )
         raise ModelRetry(
             f"TOPAS did not produce a refinement result on {config.host} "
-            f"(exit {run_returncode}). Its output was:\n{run_stdout}\n{run_stderr}\n"
+            f"(exit {run_returncode}). Its output was:\n{run_stdout}\n{run_stderr}"
+            f"{excerpt}\n\n"
             f"Whatever was written is in {local_run_dir}. Fix the .inp and try again."
         )
 

@@ -79,6 +79,14 @@ if inner.startswith("cd /d"):
     if exit_code:
         print("Error in input file", file=sys.stderr)
 
+    if os.environ.get("FAKE_TOPAS_PARSE_ERROR"):
+        # A real TOPAS 6 parse failure: a line number, the offending token, exit 0.
+        print("*** Error loading sstring_in")
+        print("    at LINE", os.environ["FAKE_TOPAS_PARSE_ERROR"])
+        print("*** Error at:", os.environ.get("FAKE_TOPAS_PARSE_TOKEN", "@"))
+        print("Abnormal program termination.")
+        sys.exit(0)
+
     if os.environ.get("FAKE_TOPAS_NO_OUTPUT"):
         # TOPAS 6 rejects the input but still exits 0
         print(" cell_volume should not have an equation at this stage")
@@ -357,3 +365,36 @@ def test_staging_leaves_a_bare_inp_when_nothing_to_rewrite(tmp_path):
 
     assert [p.name for p in data_files] == ["KD1.xy"]
     assert "xdd KD1.xy" in staged.read_text()
+
+
+def test_parse_error_quotes_the_offending_lines(remote, monkeypatch):
+    """A failed parse must show the agent the lines it wrote, not just a line number.
+
+    The agent cannot read its own .inp back, so a bare "at LINE 6" leaves it counting
+    from memory — which is how a previous session blamed the wrong line and burned a
+    second remote run on the wrong fix.
+    """
+    monkeypatch.setenv("FAKE_TOPAS_PARSE_ERROR", "6")
+    monkeypatch.setenv("FAKE_TOPAS_PARSE_TOKEN", "Out_CIF_STR")
+
+    with pytest.raises(ModelRetry) as excinfo:
+        run_topas_refinement_remote("run_dir/KD1.inp", timeout_s=60)
+
+    message = str(excinfo.value)
+    assert "KD1.inp at line 6" in message
+    assert "on the token `Out_CIF_STR`" in message
+    # the reported line, quoted with its number and marked
+    assert "> 6 |" in message
+    assert 'Out_CIF_STR("KD1_NaCoO2.cif")' in message
+    # and its neighbours, so an off-by-one is still visible
+    assert "5 |" in message and "7 |" in message
+
+
+def test_failure_without_a_line_number_quotes_nothing(remote, monkeypatch):
+    """Not every failure is a syntax error; a misleading excerpt is worse than none."""
+    monkeypatch.setenv("FAKE_TOPAS_NO_OUTPUT", "1")
+
+    with pytest.raises(ModelRetry) as excinfo:
+        run_topas_refinement_remote("run_dir/KD1.inp", timeout_s=60)
+
+    assert "stopped parsing" not in str(excinfo.value)
