@@ -15,6 +15,13 @@ from guillemot.tools import (
     save_topas_inp,
 )
 from guillemot.model import build_model, build_model_settings, context_limit
+from guillemot.prompts import (
+    available_prompts,
+    fill,
+    load_fragment,
+    render_prompt,
+    selected_prompt_name,
+)
 from guillemot.session import copy_into_session, current_session, start_session
 from guillemot.streaming import run_and_show
 from guillemot.tracing import configure_tracing
@@ -40,8 +47,13 @@ CONTEXT_LIMIT: int | None = None
 
 
 # Set up the pydantic-ai agent
-def create_agent() -> Agent:
-    """Create and configure the pydantic-ai agent"""
+def create_agent(prompt: str | None = None) -> Agent:
+    """Create and configure the pydantic-ai agent.
+
+    `prompt` names the system prompt to run with — one of the variants in
+    `guillemot.prompts`, or a path to a markdown file of your own. Defaults to
+    whatever `GUILLEMOT_PROMPT` says, and to `default` otherwise.
+    """
 
     # Get model and API key from environment. `build_model` adds retries for rate
     # limiting (HTTP 429), which would otherwise abort the run mid-refinement.
@@ -63,56 +75,24 @@ def create_agent() -> Agent:
     with open("examples/NaCoO2/example_refinement_NaCoO2.inp", "r") as f:
         topas_example = f.read()
 
+    # Where TOPAS actually runs decides which tool the model should reach for, so that
+    # part of the prompt is chosen here rather than written into every variant.
     remote_host = os.getenv("GUILLEMOT_TOPAS_SSH_HOST")
     if remote_host:
-        execution_prompt = f"""TOPAS is not installed locally: it runs on the remote machine
-'{remote_host}' over SSH. Always use `run_topas_refinement_remote` to run refinements, never
-`run_topas_refinement`. That tool refuses to start if TOPAS is already busy on the remote machine;
-you can check that yourself with `check_remote_topas_running`. Each remote run gets its own run
-directory which is copied back locally, so the paths in the result refer to the local copies.
-TOPAS runs with that directory as its working directory, so every filename in the .inp file —
-the data files it reads and the names given to the Out_* macros — should be a bare filename with
-no directory part."""
+        execution = fill(load_fragment("execution_remote"), remote_host=remote_host)
     else:
-        execution_prompt = """TOPAS runs on this machine, so use `run_topas_refinement` to run
-refinements."""
+        execution = load_fragment("execution_local")
+
+    prompt_name = prompt or selected_prompt_name()
+    system_prompt = render_prompt(
+        prompt_name, execution=execution, topas_example=topas_example
+    )
+    print(f"📝 System prompt: {prompt_name}")
 
     # Create the agent with tools
     agent = Agent(
         model,
-        system_prompt=f"""
-
-You are guillemot, an agent responsible for performing Rietveld refinements using the TOPAS-academic software package.
-
-You have access to a tool to write TOPAS .inp files to a run directory, a tool to run the refinement and get the results, and several utilities.
-You perform Rietveld refinements the way human researchers do: looking at an X-ray diffraction pattern, deciding which phases are most likely to be present based on the pattern, then trying some basic refinements and looking at the results before iterating to get the fit as good as possible.
-
-You can also analyze and understand images that users share with you.
-Use this to look at images of Rietveld refinements and plan your next refinement.
-
-Give a summary of what you've done at the end, telling each refinement you did, explaining any errors you found, and explaining why you made changes before the next refinement.
-
-If the user does not provide a CIF, you can search in the Materials Project or Crystallography Open Database via OPTIMADE.
-These searches will typically return a table of structures matching the query, which can be printed with `print_structures`.
-You can then print the most promising structures with `print_structure` and use the info to construct your TOPAS input.
-
-Some top tips:
-
-- Always start with a simple model and refine it before adding more complexity.
-  You can iteratively add and ablate phases, constraints, and parameters to see *what* improves the fit.
-- Not all parameters should be refined by TOPAS and instead can be treated as assumptions that we can update iteratively ourselves.
-- Do not 'overfit' to things like filenames. If a raw data filename is "FeSb.xy", that does not mean the data is stoichiometric Fe1Sb1, and it does not mean it is the only phase present. 
-  Use the filename as a hint, but always check the pattern and the refinement results to see if it makes sense.
-- Make sure you use proper TOPAS syntax in the .inp file. 
-  TOPAS will return errors when it encounters invalid syntax, and you should fix those errors before trying to run the refinement again.
-- You should first start by loading the pattern into TOPAS and performing a peak fitting to identify the peaks and their positions, and whether the data is even crystalline.
-- If you get confused, the problem may be underspecified and you can ask the user for more information.
-- You can assume CuKα radiation unless the user tells you otherwise.
-
-{execution_prompt}
-
-Here is an example of a topas input file for refinement of a sample of NaCoO2: {topas_example}
-    """,
+        system_prompt=system_prompt,
         tools=[
             list_available_data,
             copy_into_session,
@@ -136,7 +116,7 @@ Here is an example of a topas input file for refinement of a sample of NaCoO2: {
     return agent
 
 
-async def chat_loop():
+async def chat_loop(prompt: str | None = None):
     """Main chat loop for the terminal application"""
     print("🪶 Guillemot chat framework")
     print("=" * 40)
@@ -148,7 +128,7 @@ async def chat_loop():
     print("             'What's in this photo? /path/to/image.png'")
     print("=" * 40)
 
-    agent = create_agent()
+    agent = create_agent(prompt)
     session = current_session()
     if session is not None:
         print(f"📁 Session directory: {session.directory}")
@@ -269,10 +249,13 @@ def build_task(
 
 
 async def run_once(
-    pattern: str, elements: list[str] | None = None, notes: str | None = None
+    pattern: str,
+    elements: list[str] | None = None,
+    notes: str | None = None,
+    prompt: str | None = None,
 ) -> str:
     """Run a single refinement from the command line and print the result."""
-    agent = create_agent()
+    agent = create_agent(prompt)
     session = current_session()
 
     print("🪶 Guillemot")
@@ -310,21 +293,41 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--notes", help="anything else the agent should know about the sample"
     )
+    parser.add_argument(
+        "--prompt",
+        help=(
+            "which system prompt to run with: one of "
+            f"{', '.join(available_prompts())}, or the path to a markdown file. "
+            "Overrides GUILLEMOT_PROMPT."
+        ),
+    )
+    parser.add_argument(
+        "--list-prompts",
+        action="store_true",
+        help="show the available system prompts and exit",
+    )
     return parser.parse_args(argv)
 
 
 async def main(args: argparse.Namespace) -> None:
     """Main entry point"""
     try:
+        if args.list_prompts:
+            print("Available system prompts:")
+            for name in available_prompts():
+                marker = " (default)" if name == selected_prompt_name() else ""
+                print(f"  {name}{marker}")
+            return
+
         if args.pattern:
             elements = (
                 [e.strip() for e in args.elements.split(",") if e.strip()]
                 if args.elements
                 else None
             )
-            await run_once(args.pattern, elements, args.notes)
+            await run_once(args.pattern, elements, args.notes, args.prompt)
         else:
-            await chat_loop()
+            await chat_loop(args.prompt)
     except Exception as e:
         print(f"❌ Failed to run guillemot: {e}")
         print("Check your .env file: GUILLEMOT_AI_MODEL and the matching API key.")
