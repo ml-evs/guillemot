@@ -74,8 +74,10 @@ def list_available_data() -> DataInventory:
     """List the data files on disk, with the paths needed to use them.
 
     Call this first, before assuming anything about what is available or where it
-    lives. Every path returned is relative to the working directory and can be passed
-    straight to `inspect_xrd_pattern`, `save_topas_inp` or the refinement tools.
+    lives.
+
+    Every path returned is relative to the working directory and can be passed
+    straight to the refinement tools.
 
     Covers `data/<sample_id>/` (downloaded from datalab), `cifs/`, and this session's
     own directory. Other sessions' directories are not visible.
