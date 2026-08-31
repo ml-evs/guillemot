@@ -9,6 +9,8 @@ Only `run_and_show` is meant to be called from outside; everything else here is 
 how the terminal looks.
 """
 
+import json
+import os
 import sys
 from typing import Any
 
@@ -24,6 +26,57 @@ def dim(text: str) -> str:
     the file rather than shading in a terminal.
     """
     return f"\033[2m{text}\033[0m" if sys.stdout.isatty() else text
+
+
+# How much of a tool's arguments and result to show before cutting them off. A .inp file
+# passed to `save_topas_inp` would otherwise bury the reasoning it came from.
+ARGUMENT_WIDTH = int(os.getenv("GUILLEMOT_TOOL_ARG_WIDTH", 160))
+RESULT_WIDTH = int(os.getenv("GUILLEMOT_TOOL_RESULT_WIDTH", 200))
+
+
+def _shorten(text: str, width: int) -> str:
+    """One line, at most `width` characters, with the truncation made obvious."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _format_arguments(part) -> str:
+    """The tool's arguments as `name=value` pairs, short enough to sit on one line.
+
+    Arguments arrive either already parsed or as the JSON the model streamed; a partly
+    streamed call can leave that JSON unparseable, which is not worth an exception in
+    what is only a progress message.
+    """
+    arguments = part.args
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return _shorten(arguments, ARGUMENT_WIDTH)
+    if not isinstance(arguments, dict):
+        return _shorten(arguments, ARGUMENT_WIDTH)
+    if not arguments:
+        return ""
+
+    budget = max(ARGUMENT_WIDTH // len(arguments), 24)
+    return ", ".join(f"{k}={_shorten(v, budget)}" for k, v in arguments.items())
+
+
+def _show_tool_call(part) -> None:
+    """Announce a tool call as it is made, so a long run is legible as it happens."""
+    print(dim(f"🔧 {part.tool_name}({_format_arguments(part)})"), flush=True)
+
+
+def _show_tool_result(event) -> None:
+    """Say how a tool call turned out. Retries are the interesting case, so say so."""
+    from pydantic_ai.messages import RetryPromptPart
+
+    result = event.result
+    if isinstance(result, RetryPromptPart):
+        complaint = _shorten(result.model_response(), RESULT_WIDTH)
+        print(dim(f"   ↩ retrying: {complaint}"), flush=True)
+        return
+    print(dim(f"   ↳ {_shorten(result.content, RESULT_WIDTH)}"), flush=True)
 
 
 def _report_context_usage(used: int, limit: int | None) -> None:
@@ -44,12 +97,15 @@ def _report_context_usage(used: int, limit: int | None) -> None:
 async def run_and_show(
     agent: Agent, message: Any, context_limit: int | None = None
 ) -> str:
-    """Run the agent, printing its reasoning as it arrives, and return the answer.
+    """Run the agent, printing its reasoning and tool calls as they arrive, and return
+    the answer.
 
     `context_limit` is how many tokens the model can hold; without it the context
     meter reports tokens but no percentage.
     """
     from pydantic_ai.messages import (
+        FunctionToolCallEvent,
+        FunctionToolResultEvent,
         PartDeltaEvent,
         PartStartEvent,
         ThinkingPart,
@@ -69,10 +125,29 @@ async def run_and_show(
             thinking = True
         print(dim(text), end="", flush=True)
 
+    def end_thinking() -> None:
+        """Close an open block of reasoning, so what follows starts on a clean line."""
+        nonlocal thinking
+        if thinking:
+            print("\n", flush=True)
+            thinking = False
+
     async with agent.iter(message) as run:
         async for node in run:
+            # Tool calls are handled in their own node, after the request that asked for
+            # them: this is where the arguments are complete and the results arrive.
+            if Agent.is_call_tools_node(node):
+                async with node.stream(run.ctx) as stream:
+                    async for event in stream:
+                        if isinstance(event, FunctionToolCallEvent):
+                            _show_tool_call(event.part)
+                        elif isinstance(event, FunctionToolResultEvent):
+                            _show_tool_result(event)
+                continue
+
             if not Agent.is_model_request_node(node):
                 continue
+
             async with node.stream(run.ctx) as stream:
                 async for event in stream:
                     if isinstance(event, PartStartEvent) and isinstance(
@@ -83,9 +158,7 @@ async def run_and_show(
                         event.delta, ThinkingPartDelta
                     ):
                         show_thinking(event.delta.content_delta or "")
-            if thinking:
-                print("\n", flush=True)  # leave the answer a clean line to start on
-                thinking = False
+            end_thinking()
 
             # `run.usage()` accumulates over the whole run, but what fills the window is
             # a single request's prompt: the difference since the last one.
