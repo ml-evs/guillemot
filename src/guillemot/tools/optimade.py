@@ -126,7 +126,9 @@ def get_optimade_structures(
 
 
 def print_structures(structures: list[dict]) -> str:
-    """Prints the structure query results as passed.
+    """Prints the structure query results.
+
+    MUST use all the fields provided by OPTIMADE.
 
     Parameters:
         structures: A list of optimade Structure objects.
@@ -177,6 +179,8 @@ def print_structures(structures: list[dict]) -> str:
 def print_structure(structure: dict) -> str:
     """Focus in on a single structure and print the lattice, atom positions and space group to
     be used when creating a topas input.
+
+    MUST use all the fields provided by OPTIMADE.
 
     Paramters:
         structure: An optimade Structure object.
