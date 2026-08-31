@@ -97,6 +97,23 @@ GUILLEMOT_TOPAS_SSH_PORT=22                         # optional, only if non-stan
 - `plot_refinement_results` — Plot observed vs calculated pattern and residuals, optionally annotate HKL ticks, save PNG, and return the image filepath and binary content.
 - `get_sample` and `get_samples` — Download sample metadata from the configured [*datalab*](https://datalab-org.io) to find uploaded XRD patterns.
 
+## System prompts
+
+The system prompts live in `src/guillemot/prompts/` as one markdown file per variant, so
+wordings can be compared without touching the application. Pick one with `--prompt`, or set
+`GUILLEMOT_PROMPT`; `guillemot --list-prompts` shows what is there.
+
+```shell
+guillemot --list-prompts
+guillemot --prompt concise --pattern examples/HL2-1/HL2-1_2.xy
+guillemot --prompt ~/experiments/terse-with-hkl.md    # a path works too
+```
+
+A prompt is filled in before it is sent: `{{execution}}` becomes the instructions for wherever
+TOPAS is actually running (local, or over SSH — the fragments in `prompts/fragments/`), and
+`{{topas_example}}` becomes the worked NaCoO2 example. Both must appear in any new variant;
+leaving one out is an error at start-up rather than a placeholder sent to the model.
+
 ## Tracing
 
 Each run is instrumented with [Logfire](https://logfire.pydantic.dev). 

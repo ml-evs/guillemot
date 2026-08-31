@@ -31,6 +31,11 @@ guillemot = "guillemot.main:launch"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The system prompts are text files, and are no use to an installed guillemot unless
+# they are installed with it.
+[tool.setuptools.package-data]
+"guillemot.prompts" = ["*.md", "fragments/*.md"]
+
 # ignore F841 in ruff rules
 [tool.ruff.lint]
 select = ["E"]
