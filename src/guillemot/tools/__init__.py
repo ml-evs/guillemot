@@ -12,6 +12,7 @@ from .topas import (
 from .optimade import get_optimade_structures, print_structure, print_structures
 from .files import list_available_data, DataInventory
 from .plotting import plot_refinement_results
+from .jsonRead import patternFromJson
 
 __all__ = (
     "check_remote_topas_running",
@@ -28,4 +29,5 @@ __all__ = (
     "print_structures",
     "list_available_data",
     "DataInventory",
+    "patternFromJson",
 )
