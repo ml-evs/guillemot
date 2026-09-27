@@ -95,7 +95,7 @@ def _report_context_usage(used: int, limit: int | None) -> None:
 
 
 async def run_and_show(
-    agent: Agent, message: Any, context_limit: int | None = None
+    agent: Agent, message: Any, context_limit: int | None = None, agent_name: str | None=None
 ) -> str:
     """Run the agent, printing its reasoning and tool calls as they arrive, and return
     the answer.
@@ -121,7 +121,7 @@ async def run_and_show(
         if not text:
             return
         if not thinking:
-            print("\n💭 Thinking:", flush=True)
+            print(f"\n💭 {agent_name} Thinking:", flush=True)
             thinking = True
         print(dim(text), end="", flush=True)
 
@@ -162,7 +162,7 @@ async def run_and_show(
 
             # `run.usage()` accumulates over the whole run, but what fills the window is
             # a single request's prompt: the difference since the last one.
-            total = run.usage().input_tokens
+            total = run.usage.input_tokens
             _report_context_usage(total - counted, context_limit)
             counted = total
 

@@ -11,7 +11,9 @@ dependencies = [
     "optimade[http-client,cif,pymatgen]",
     "matplotlib>=3.10.6",
     "pandas>=2.3.2",
-    "datalab-api"
+    "datalab-api",
+    "pydantic-ai-harness[anthropic]>=0.4.0",
+    "pydantic-ai-slim[openai]>=1.107.5",
 ]
 
 [tool.uv]

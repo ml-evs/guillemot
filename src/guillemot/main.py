@@ -1,8 +1,15 @@
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 import argparse
 import asyncio
 import os
 
-from dotenv import load_dotenv
+from guillemot.subagents.guilVision import guilVision
+from guillemot.subagents.guilVision import GUILVISION_CONTEXT_LIMIT
+
 from guillemot.tools import (
     check_remote_topas_running,
     get_optimade_structures,
@@ -34,8 +41,6 @@ from guillemot.utils import (
     load_local_image,
 )
 
-# Load environment variables
-load_dotenv()
 
 
 # Initialize conversation history
@@ -85,8 +90,11 @@ def create_agent(prompt: str | None = None) -> Agent:
 
     prompt_name = prompt or selected_prompt_name()
     system_prompt = render_prompt(
-        prompt_name, execution=execution, topas_example=topas_example
+        prompt_name= "guilVision1",
+        execution=execution,
+        topas_example=topas_example,
     )
+    
     print(f"📝 System prompt: {prompt_name}")
 
     # Create the agent with tools
@@ -109,7 +117,6 @@ def create_agent(prompt: str | None = None) -> Agent:
             list_data_files,
         ],
         model_settings=model_settings,
-        instrument=True,
         retries=5,
     )
 
@@ -167,19 +174,29 @@ async def chat_loop(prompt: str | None = None):
             has_image = False
             message_parts = []
 
+            
             # Check for local image path
             if is_local_image_path(user_input):
-                text_without_path, image_path = extract_local_image_path(user_input)
+                text_without_path, image_path = extract_local_image_path(user_input) #seperates the local image from the user's text input
                 image_content = load_local_image(image_path)
 
                 if image_content:
-                    if text_without_path:
-                        message_parts.append(text_without_path)
-                    else:
-                        message_parts.append("Please analyze this image:")
-                    message_parts.append(image_content)
-                    has_image = True
                     print(f"🖼️  Loaded local image: {image_path}")
+
+                    #if the user provides an image/plot, subagent 'guilVision' will run intead of guillemot
+                    vision_result= await run_and_show(
+                        agent=guilVision,
+                        message= [text_without_path or "Analyse this PXRD plot", image_content],
+                        context_limit= GUILVISION_CONTEXT_LIMIT,
+                        agent_name="GuilVision"
+                    )
+
+                    # the output and the user input from guilVision will be stored in message_parts
+                    analysis= vision_result.output
+                    message_parts.append(text_without_path or "Analyse this PXRD plot")
+                    message_parts.append(analysis)
+                    has_image= True
+                
                 else:
                     print("❌ Failed to load image. Proceeding with text only.")
                     message_parts.append(user_input)
@@ -209,7 +226,7 @@ async def chat_loop(prompt: str | None = None):
                 agent_message = full_prompt
 
             # Run the agent, showing its reasoning while it works
-            response_text = await run_and_show(agent, agent_message, CONTEXT_LIMIT)
+            response_text = await run_and_show(agent, agent_message, CONTEXT_LIMIT, "Guillemot")
 
             print("🤖 Assistant: ", end="", flush=True)
             print(response_text)
@@ -221,7 +238,9 @@ async def chat_loop(prompt: str | None = None):
             print("\n\n👋 Goodbye!")
             break
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            print(f"\n❌ Error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             print("Please try again or type 'quit' to exit.")
 
 
