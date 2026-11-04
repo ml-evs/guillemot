@@ -11,6 +11,9 @@ Configured through the environment:
 * ``GUILLEMOT_RETRY_BACKOFF_S`` — seconds to wait before the first retry (default 15).
 * ``GUILLEMOT_RETRY_MAX_WAIT_S`` — cap on any single wait (default 300).
 * ``GUILLEMOT_OLLAMA_URL`` — the ollama server, when using an ``ollama:`` model.
+* ``GUILLEMOT_HTTP_TIMEOUT_S`` — how long to wait on a model request (default 600). A
+  local server shared by several agents can take minutes to start answering one of
+  them, and a request that times out has to be resent from scratch.
 """
 
 import logging
@@ -28,6 +31,7 @@ def _warn(message: str, **attributes) -> None:
 DEFAULT_ATTEMPTS = 5
 DEFAULT_BACKOFF_S = 15.0
 DEFAULT_MAX_WAIT_S = 300.0
+DEFAULT_HTTP_TIMEOUT_S = 600.0
 DEFAULT_OLLAMA_URL = "http://localhost:11434/v1"
 
 # Rate limiting, plus the transient server-side failures worth another go.
@@ -168,7 +172,8 @@ def _retrying_http_client(settings: RetrySettings):
         ),
         validate_response=lambda response: response.raise_for_status(),
     )
-    return httpx.AsyncClient(transport=transport, timeout=120)
+    timeout = float(os.getenv("GUILLEMOT_HTTP_TIMEOUT_S", DEFAULT_HTTP_TIMEOUT_S))
+    return httpx.AsyncClient(transport=transport, timeout=timeout)
 
 
 def _openai_model(model_id: str, settings: RetrySettings) -> Model:
