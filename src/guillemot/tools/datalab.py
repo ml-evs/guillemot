@@ -57,4 +57,11 @@ def get_sample(sample_id: str | None):
 
 def list_data_files(sample_id: str):
     """List data files that have been downloaded for a given sample."""
-    return os.listdir(f"./data/{sample_id}")
+    directory = Path("data") / sample_id
+    if not directory.is_dir():
+        raise ModelRetry(
+            f"No sample {sample_id!r} has been downloaded from datalab. Only use this "
+            "for samples fetched with `get_sample`; for files already on disk, call "
+            "`list_available_data`."
+        )
+    return os.listdir(directory)
