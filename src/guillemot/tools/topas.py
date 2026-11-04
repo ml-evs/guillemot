@@ -1,3 +1,5 @@
+import fcntl
+import hashlib
 import os
 import pathlib
 import re
@@ -11,9 +13,10 @@ from datetime import datetime
 from os.path import join
 from typing import Optional
 
+from guillemot.deadline import minutes_remaining, wrap_up_note
 from guillemot.session import session_dir
 from guillemot.tools.plotting import render_refinement_plot
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_ai.exceptions import ModelRetry
 
 RUN_DIR = "run_dir"  # fallback root when no session has been started
@@ -167,6 +170,22 @@ class RunRefinementResult(BaseModel):
     logs_tail: Optional[str]
     plot_path: Optional[str]
     # aux_files: list[str] = Field(default_factory=list)  # any xy/csv exports found
+    rwp: Optional[float] = Field(
+        default=None,
+        description="Rwp in percent over the whole pattern, computed from the output file.",
+    )
+    refined_values: list[str] = Field(
+        default_factory=list,
+        description="Each changed line of the input, as `start  ->  refined`.",
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Refined values that look wrong. Deal with these before anything else.",
+    )
+    time_remaining_minutes: Optional[float] = Field(
+        default=None,
+        description="Minutes left before this run is stopped, when there is a deadline.",
+    )
 
 
 def _collect_refinement_outputs(inp_path: str) -> dict:
@@ -207,12 +226,211 @@ def _collect_refinement_outputs(inp_path: str) -> dict:
             hkl_file=hkl_file,
         )
 
+    refined_values, warnings = (
+        refinement_report(_read_text(inp_path), outfile_contents)
+        if outfile_contents
+        else ([], [])
+    )
+
+    if note := wrap_up_note():
+        warnings = [note] + warnings
+
     return {
         "outfile_path": outfile_path,
         "outfile_contents": outfile_contents,
         "refinement_result_path": refinement_result_path,
         "plot_path": plot_path,
+        "rwp": _rwp_from_output(refinement_result_path),
+        "refined_values": refined_values,
+        "warnings": warnings,
+        "time_remaining_minutes": minutes_remaining(),
     }
+
+# A number as TOPAS writes it in a .out: the value, then a backtick if it was refined,
+# then optionally `_esd` and/or a `_LIMIT_MIN_#`/`_LIMIT_MAX_#` flag.
+_OUT_NUMBER_RE = re.compile(r"-?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?(?:`(?:_[-+0-9.eE]+)?)?")
+_LIMIT_RE = re.compile(r"_LIMIT_(MIN|MAX)_(-?[0-9.eE+-]+)")
+_LATTICE_RE = re.compile(r"^\s*(a|b|c)\s+(?:!?[A-Za-z_]\w*\s+|@\s*)?(-?[0-9.]+)")
+_BEQ_RE = re.compile(r"\bbeq\s+(?:!?[A-Za-z_]\w*\s+|@\s*)?(-?[0-9.]+)")
+_SIZE_RE = re.compile(r"\b(CS_L|CS_G|CS|Crystallite_Size)\(\s*[^,]*,\s*(-?[0-9.]+)")
+_SPACE_GROUP_RE = re.compile(r"^\s*space_group\s+(\S+)")
+
+# Relative change in a lattice parameter beyond which a refinement has probably gone
+# astray rather than converged: a wrong peak assignment, or a zero/displacement error
+# absorbed into the cell.
+LATTICE_JUMP = 0.02
+# Crystallite sizes are in nm with a floor of 0.3; anything this small means peaks so
+# broad the refinement cannot see them — usually a starting value in the wrong units.
+SMALL_CRYSTALLITE_NM = 2.0
+MAX_REPORTED_CHANGES = 40
+# Isotropic displacement parameters above this (Å²) usually mean something else is wrong.
+LARGE_BEQ = 4.0
+
+
+def _line_key(line: str) -> str:
+    """A line with its numbers masked, for lining up an .inp with its .out."""
+    line = _LIMIT_RE.sub("", line.split("'")[0])
+    return "".join(_OUT_NUMBER_RE.sub("#", line).split())
+
+
+def _plain(line: str) -> str:
+    """A .out line without esds or refinement marks, and with tidy whitespace."""
+    line = re.sub(r"`(_[-+0-9.eE]+)?", "", _LIMIT_RE.sub("", line))
+    return " ".join(line.split())
+
+
+def _crystal_family(space_group: str) -> str | None:
+    """'cubic', 'hexagonal-like' or None, from a space group number or symbol."""
+    try:
+        number = int(space_group)
+    except ValueError:
+        try:
+            from pymatgen.symmetry.groups import SpaceGroup
+
+            number = SpaceGroup(space_group.replace("_", "")).int_number
+        except Exception:
+            return None
+    if 195 <= number <= 230:
+        return "cubic"
+    if 75 <= number <= 194:
+        return "a=b"  # tetragonal, trigonal and hexagonal all have a = b
+    return None
+
+
+def refinement_report(inp_text: str, out_text: str) -> tuple[list[str], list[str]]:
+    """(changes, warnings) between the .inp that was run and the .out TOPAS wrote.
+
+    The .out is the .inp with refined values filled in, so lining the two up line by
+    line shows what moved; the warnings are the checks a crystallographer makes before
+    looking at the plot.
+    """
+    import difflib
+
+    inp_lines, out_lines = inp_text.splitlines(), out_text.splitlines()
+    matcher = difflib.SequenceMatcher(
+        a=[_line_key(line) for line in inp_lines],
+        b=[_line_key(line) for line in out_lines],
+        autojunk=False,
+    )
+    pairs = [
+        (inp_lines[block.a + k], out_lines[block.b + k])
+        for block in matcher.get_matching_blocks()
+        for k in range(block.size)
+    ]
+
+    changes: list[str] = []
+    warnings: list[str] = []
+    family = None
+    cell: dict[str, float] = {}
+    jumps: list[str] = []
+
+    def check_cell():
+        if jumps:
+            warnings.append(
+                f"The cell moved a long way ({', '.join(jumps)}). That is fine if the "
+                "starting cell was simply off and the peaks now line up in the plot; "
+                "otherwise it usually means a wrong peak assignment, a zero or "
+                "displacement error absorbed into the cell, or peaks too broad to fit."
+            )
+        if (
+            family == "cubic"
+            and len(cell) == 3
+            and max(cell.values()) - min(cell.values()) > 1e-4
+        ):
+            warnings.append(
+                f"The space group is cubic but a, b, c refined to different values "
+                f"({cell['a']:.5f}, {cell['b']:.5f}, {cell['c']:.5f}): give all three the "
+                "same parameter name, or use Cubic(@ value)."
+            )
+        if (
+            family == "a=b"
+            and {"a", "b"} <= cell.keys()
+            and abs(cell["a"] - cell["b"]) > 1e-4
+        ):
+            warnings.append(
+                f"The space group requires a = b, but they refined to {cell['a']:.5f} and "
+                f"{cell['b']:.5f}: give a and b the same parameter name."
+            )
+
+    for before, after in pairs:
+        if before.strip().startswith("str") and before.split()[:1] == ["str"]:
+            check_cell()
+            family, cell, jumps = None, {}, []
+        if match := _SPACE_GROUP_RE.match(before):
+            family = _crystal_family(match.group(1))
+
+        refined = _plain(after)
+        if "`" in after and _plain(before) != refined:
+            changes.append(f"{_plain(before)}  ->  {refined}")
+
+        for limit in _LIMIT_RE.finditer(after):
+            warnings.append(
+                f"TOPAS flagged this as refined to its {limit.group(1).lower()}imum limit "
+                f"({limit.group(2)}): `{refined}`. Check whether the parameter is needed at "
+                "all, and its starting value."
+            )
+
+        if (start := _LATTICE_RE.match(before)) and (end := _LATTICE_RE.match(after)):
+            axis, a0, a1 = start.group(1), float(start.group(2)), float(end.group(2))
+            cell[axis] = a1
+            if a0 and abs(a1 - a0) / a0 > LATTICE_JUMP:
+                jumps.append(f"{axis} {a0} -> {a1}, {100 * (a1 - a0) / a0:+.1f}%")
+
+        for beq in _BEQ_RE.finditer(after):
+            if float(beq.group(1)) < 0:
+                warnings.append(f"Negative beq is unphysical: `{refined}`.")
+            elif float(beq.group(1)) > LARGE_BEQ:
+                warnings.append(
+                    f"beq of {float(beq.group(1)):.2f} Å² is far larger than an ordered "
+                    f"solid has (about 0.3-2): `{refined}`. The usual causes are a missing "
+                    "LP_Factor, unmodelled absorption, or a wrong occupancy."
+                )
+
+        for size in _SIZE_RE.finditer(after):
+            if float(size.group(2)) < SMALL_CRYSTALLITE_NM:
+                warnings.append(
+                    f"{size.group(1)} crystallite size is {float(size.group(2)):.3g} nm, at "
+                    "or near its 0.3 nm minimum: the peaks are modelled as enormously broad. "
+                    "Sizes are in nm; start at 100-300."
+                )
+    check_cell()
+    if re.search(r"^\s*xdd", inp_text, re.MULTILINE) and "LP_Factor" not in inp_text:
+        warnings.append(
+            "There is no LP_Factor: the Lorentz factor applies to every powder pattern, "
+            "synchrotron included. Add LP_Factor(90) (or the example's form for lab data)."
+        )
+
+    if len(changes) > MAX_REPORTED_CHANGES:
+        changes = changes[:MAX_REPORTED_CHANGES] + [
+            f"... and {len(changes) - MAX_REPORTED_CHANGES} more; read the .out for the rest."
+        ]
+    return changes, list(dict.fromkeys(warnings))
+
+
+def _time_suffix() -> str:
+    """The deadline, for appending to a failure the agent has to act on."""
+    if note := wrap_up_note():
+        return f"\n\n{note}"
+    remaining = minutes_remaining()
+    return f"\n\n({remaining:.0f} minutes remain.)" if remaining is not None else ""
+
+
+def _rwp_from_output(path: Optional[str]) -> Optional[float]:
+    """Rwp (%) with 1/yobs weights from an `Out_X_Yobs_Ycalc` file, or None."""
+    if not path:
+        return None
+    try:
+        import numpy as np
+
+        data = np.loadtxt(path, usecols=(0, 1, 2), ndmin=2)
+    except Exception:
+        return None
+    yobs, ycalc = data[:, 1], data[:, 2]
+    if len(yobs) == 0 or np.any(yobs <= 0):
+        return None
+    return round(
+        float(100 * np.sqrt(np.sum((yobs - ycalc) ** 2 / yobs) / np.sum(yobs))), 3
+    )
 
 
 def run_topas_refinement(inp_path: str, timeout_s: int = 60) -> RunRefinementResult:
@@ -247,7 +465,7 @@ def run_topas_refinement(inp_path: str, timeout_s: int = 60) -> RunRefinementRes
         raise ModelRetry(
             f"TOPAS did not produce a refinement result (exit {returncode}). "
             f"Its output was:\n{stdout}\n{stderr}{excerpt}\n\n"
-            "Fix the .inp and try again."
+            "Fix the .inp and try again." + _time_suffix()
         )
 
     # todo: add tail of log file located at \Science\Topas-7\topas.log
@@ -277,12 +495,17 @@ class TopasSSHConfig(BaseModel):
       remote machine guillemot writes to. Each run gets its own subdirectory of it,
       and TOPAS is confined to that subdirectory.
     * ``GUILLEMOT_TOPAS_SSH_PORT`` - optional non-standard SSH port.
+    * ``GUILLEMOT_TOPAS_SSH_PASSWORD`` - optional password, for a machine that does not
+      accept our key. It is handed to ``sshpass`` through its environment, never on a
+      command line, so it does not show up in ``ps`` or in error messages. Key
+      authentication is preferable wherever it is possible.
     """
 
     host: str
     topas_exe: str = DEFAULT_TOPAS_EXE
     remote_base_dir: str = DEFAULT_REMOTE_BASE_DIR
     port: Optional[int] = None
+    password: Optional[SecretStr] = None
 
     @field_validator("host", "topas_exe", "remote_base_dir")
     @classmethod
@@ -319,22 +542,46 @@ class TopasSSHConfig(BaseModel):
                 "GUILLEMOT_TOPAS_REMOTE_DIR", DEFAULT_REMOTE_BASE_DIR
             ),
             port=int(port) if port else None,
+            password=os.getenv("GUILLEMOT_TOPAS_SSH_PASSWORD") or None,
         )
 
     def run_dir_for(self, run_id: str) -> str:
         """The remote directory for one refinement: a subdirectory of the workspace."""
         return f"{_win_path(self.remote_base_dir)}\\{_sanitise_run_id(run_id)}"
 
+    def _auth_prefix(self, program: str) -> list[str]:
+        """How ssh/scp start: non-interactive with a key, or through sshpass.
+
+        BatchMode forbids password prompts outright, so with a password it is swapped
+        for a single prompt for sshpass to answer: a wrong password then fails at once
+        rather than leaving the run waiting at a prompt nobody will see.
+        """
+        if self.password is None:
+            return [program, "-o", "BatchMode=yes"]
+        if shutil.which("sshpass") is None:
+            raise RuntimeError(
+                "GUILLEMOT_TOPAS_SSH_PASSWORD is set but `sshpass` is not installed; "
+                "install it, or set up key authentication to the TOPAS machine."
+            )
+        return ["sshpass", "-e", program, "-o", "NumberOfPasswordPrompts=1"]
+
+    @property
+    def subprocess_env(self) -> Optional[dict]:
+        """The environment for ssh/scp: ours, plus the password for sshpass if any."""
+        if self.password is None:
+            return None
+        return {**os.environ, "SSHPASS": self.password.get_secret_value()}
+
     @property
     def ssh_cmd(self) -> list[str]:
-        cmd = ["ssh", "-o", "BatchMode=yes"]
+        cmd = self._auth_prefix("ssh")
         if self.port:
             cmd += ["-p", str(self.port)]
         return cmd + [self.host]
 
     @property
     def scp_cmd(self) -> list[str]:
-        cmd = ["scp", "-o", "BatchMode=yes", "-r"]
+        cmd = self._auth_prefix("scp") + ["-r"]
         if self.port:
             # scp spells the port flag with a capital P
             cmd += ["-P", str(self.port)]
@@ -352,7 +599,7 @@ def _scp_path(path: str) -> str:
 
 
 def _run_streaming(
-    cmd: list[str], timeout_s: int, echo: bool = True
+    cmd: list[str], timeout_s: int, echo: bool = True, env: Optional[dict] = None
 ) -> tuple[int | None, str, str]:
     """Run ``cmd``, echoing output as it arrives, and return (returncode, stdout, stderr).
 
@@ -360,6 +607,7 @@ def _run_streaming(
     """
     proc = subprocess.Popen(
         cmd,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -415,7 +663,10 @@ def _ssh(
     OpenSSH default shell is cmd.exe or PowerShell.
     """
     return _run_streaming(
-        config.ssh_cmd + [f'cmd /c "{remote_command}"'], timeout_s=timeout_s, echo=echo
+        config.ssh_cmd + [f'cmd /c "{remote_command}"'],
+        timeout_s=timeout_s,
+        echo=echo,
+        env=config.subprocess_env,
     )
 
 
@@ -555,7 +806,7 @@ class RemoteRefinementResult(RunRefinementResult):
     files_returned: list[str] = Field(default_factory=list)
 
 
-def run_topas_refinement_remote(
+def _run_topas_refinement_remote_unlocked(
     inp_path: str,
     timeout_s: int = 600,
     extra_files: Optional[list[str]] = None,
@@ -566,6 +817,10 @@ def run_topas_refinement_remote(
     every data file it references into a fresh timestamped run directory on the remote
     machine, runs TOPAS there while streaming its output, then syncs the whole run
     directory back locally and plots the result.
+
+    On success the result gives the Rwp, every value the refinement changed
+    (`refined_values`, as `start  ->  refined`), and `warnings` about refined values that
+    look wrong — deal with any warnings before anything else.
 
     The plot of the fit is saved to `plot_path` in the returned result, but is not shown
     to you here. To look at it, call `plot_refinement_results` with the returned
@@ -592,8 +847,11 @@ def run_topas_refinement_remote(
     # this tool can be handed a path that did not come from `save_topas_inp`.
     _check_safe_filename(local_inp.name, "input filename")
 
+    # Tagged with the session, so two agents running `riet_01` in the same second (as
+    # concurrent benchmark entries can) never share a remote directory.
+    session_tag = hashlib.sha1(str(session_dir().resolve()).encode()).hexdigest()[:6]
     run_id = _sanitise_run_id(
-        f"{local_inp.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"{local_inp.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{session_tag}"
     )
     remote_run_dir = config.run_dir_for(run_id)
 
@@ -611,13 +869,17 @@ def run_topas_refinement_remote(
                 )
             uploads.append(extra_path)
 
-        # (a) refuse to start a second refinement on top of a running one
-        status = check_remote_topas_running()
-        if status.running:
-            raise ModelRetry(
-                f"TOPAS is already running on {config.host}: {status.processes}. "
-                "Wait for that refinement to finish before starting another one."
-            )
+        # (a) never start a second refinement on top of a running one. Refinements from
+        # this machine are already queued by the lock in `run_topas_refinement_remote`;
+        # this waits out anyone else's, and only gives up if one runs for a long time.
+        waited_until = time.monotonic() + TOPAS_BUSY_WAIT_S
+        while (status := check_remote_topas_running()).running:
+            if time.monotonic() > waited_until:
+                raise ModelRetry(
+                    f"TOPAS is already running on {config.host} ({status.processes}) and "
+                    f"has been for over {TOPAS_BUSY_WAIT_S // 60} minutes. Try again later."
+                )
+            time.sleep(15)
 
         # (b) create a fresh, run-specific directory and upload the inputs into it
         returncode, stdout, stderr = _ssh(
@@ -637,7 +899,7 @@ def run_topas_refinement_remote(
             + [f"{config.host}:{_scp_path(remote_run_dir)}/"]
         )
         returncode, stdout, stderr = _run_streaming(
-            upload_cmd, timeout_s=300, echo=False
+            upload_cmd, timeout_s=300, echo=False, env=config.subprocess_env
         )
         if returncode != 0:
             raise ModelRetry(
@@ -652,7 +914,11 @@ def run_topas_refinement_remote(
     print(f"▶ running TOPAS on {config.host} in {remote_run_dir}", flush=True)
     run_returncode, run_stdout, run_stderr = _ssh(
         config,
-        f'cd /d "{remote_run_dir}" && "{config.topas_exe}" "{local_inp.name}"',
+        # The .inp is named by its full path: TOPAS 8 resolves a bare filename against
+        # its own install directory, not the working directory (TOPAS 6 used the
+        # latter). Its data and output files are relative to the .inp, so they still
+        # land in the run directory.
+        f'cd /d "{remote_run_dir}" && "{config.topas_exe}" "{remote_run_dir}\\{local_inp.name}"',
         timeout_s=timeout_s,
         echo=True,
     )
@@ -672,7 +938,7 @@ def run_topas_refinement_remote(
         str(local_run_dir.parent),
     ]
     dl_returncode, dl_stdout, dl_stderr = _run_streaming(
-        download_cmd, timeout_s=300, echo=False
+        download_cmd, timeout_s=300, echo=False, env=config.subprocess_env
     )
     if dl_returncode != 0:
         raise ModelRetry(
@@ -707,6 +973,7 @@ def run_topas_refinement_remote(
             f"(exit {run_returncode}). Its output was:\n{run_stdout}\n{run_stderr}"
             f"{excerpt}\n\n"
             f"Whatever was written is in {local_run_dir}. Fix the .inp and try again."
+            + _time_suffix()
         )
 
     return RemoteRefinementResult(
@@ -722,3 +989,30 @@ def run_topas_refinement_remote(
         files_returned=files_returned,
         **outputs,
     )
+
+
+# How long to wait for someone else's TOPAS run on the shared machine to finish.
+TOPAS_BUSY_WAIT_S = 600
+
+
+def run_topas_refinement_remote(
+    inp_path: str,
+    timeout_s: int = 600,
+    extra_files: Optional[list[str]] = None,
+) -> RemoteRefinementResult:
+    # Several agents on this machine (concurrent benchmark entries) take turns: TOPAS
+    # runs take seconds, so queueing costs little, where refusing would cost a turn.
+    config = TopasSSHConfig.from_env()
+    lock_path = pathlib.Path(RUN_DIR) / f".topas-{_sanitise_run_id(config.host)}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            return _run_topas_refinement_remote_unlocked(
+                inp_path, timeout_s, extra_files
+            )
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+run_topas_refinement_remote.__doc__ = _run_topas_refinement_remote_unlocked.__doc__
