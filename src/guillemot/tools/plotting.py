@@ -1,13 +1,20 @@
+import threading
 from typing import Optional
 
 import matplotlib
 import matplotlib.pyplot as plt
 import pandas as pd
+from guillemot.deadline import minutes_remaining, wrap_up_note
 from guillemot.utils import load_local_image
 from pydantic import BaseModel
-from pydantic_ai import ToolReturn
+from pydantic_ai import ModelRetry, ToolReturn
 
 matplotlib.use("Agg")  # Use a non-interactive backend to not crash agent
+
+# pyplot keeps global state and its mathtext parser is not thread-safe, while the agent
+# runs tool calls concurrently in worker threads: three zoomed plots asked for in one
+# turn failed to parse the axis label and killed a whole benchmark run. One at a time.
+_PLOT_LOCK = threading.Lock()
 
 
 class PlotResultsOutput(BaseModel):
@@ -18,6 +25,8 @@ class PlotResultsOutput(BaseModel):
     """
 
     output_filepath: str
+    time_remaining_minutes: Optional[float] = None
+    note: Optional[str] = None
 
 
 def render_refinement_plot(
@@ -30,9 +39,19 @@ def render_refinement_plot(
 
     This is the plotting itself, with no model-facing content attached: callers that
     only want the PNG on disk (a finished refinement, say) use this, while
-    `plot_refinement_results` wraps it for the agent.
+    `plot_refinement_results` wraps it for the agent. Safe to call from several
+    threads at once; the drawing itself is serialised.
     """
+    with _PLOT_LOCK:
+        return _render_refinement_plot(output_file, save_path, hkl_file, x_range)
 
+
+def _render_refinement_plot(
+    output_file: str,
+    save_path: str,
+    hkl_file: Optional[str],
+    x_range: list[float] | None,
+) -> str:
     # ---- Load total pattern ----
     df = pd.read_csv(output_file, sep="\s+", header=None)
     x, yobs, ycalc = df[0], df[1], df[2]
@@ -164,16 +183,27 @@ def plot_refinement_results(
     Returns:
         The path to the saved image, plus the image itself for you to look at.
     """
-    render_refinement_plot(
-        output_file=output_file,
-        save_path=save_path,
-        hkl_file=hkl_file,
-        x_range=x_range,
-    )
+    try:
+        render_refinement_plot(
+            output_file=output_file,
+            save_path=save_path,
+            hkl_file=hkl_file,
+            x_range=x_range,
+        )
+    except Exception as exc:
+        # A plot that cannot be drawn is no reason to end the run; say what went wrong.
+        raise ModelRetry(
+            f"Could not plot {output_file}: {type(exc).__name__}: {exc}. Check the path "
+            "is a refinement's `_output.txt` and that any x_range lies within its data."
+        ) from exc
 
     image = load_local_image(save_path)
     return ToolReturn(
-        return_value=PlotResultsOutput(output_filepath=save_path),
+        return_value=PlotResultsOutput(
+            output_filepath=save_path,
+            time_remaining_minutes=minutes_remaining(),
+            note=wrap_up_note(),
+        ),
         # `content` reaches the model as a genuine image part. Returning the
         # BinaryContent inside `return_value` instead would serialise it to base64 and
         # the model would see tens of thousands of tokens of text it cannot read.
