@@ -1,13 +1,17 @@
+# This file was edited with the assistance of an AI model and requires human review from the contributor.
 import argparse
 import asyncio
 import os
 
 from dotenv import load_dotenv
 from guillemot.tools import (
+    cif_to_topas_str,
+    describe_structure,
     check_remote_topas_running,
     get_optimade_structures,
     list_available_data,
     print_structure,
+    read_file,
     print_structures,
     plot_refinement_results,
     run_topas_refinement,
@@ -47,12 +51,20 @@ CONTEXT_LIMIT: int | None = None
 
 
 # Set up the pydantic-ai agent
-def create_agent(prompt: str | None = None) -> Agent:
+def create_agent(
+    prompt: str | None = None,
+    session_id: str | None = None,
+    exclude_tools: set[str] | None = None,
+) -> Agent:
     """Create and configure the pydantic-ai agent.
 
     `prompt` names the system prompt to run with — one of the variants in
     `guillemot.prompts`, or a path to a markdown file of your own. Defaults to
     whatever `GUILLEMOT_PROMPT` says, and to `default` otherwise.
+
+    `session_id` names the session directory under `run_dir/`; a fresh timestamped
+    one is made when it is not given. `exclude_tools` names tools to leave out, for
+    tasks where they could only distract (the benchmark has no use for datalab).
     """
 
     # Get model and API key from environment. `build_model` adds retries for rate
@@ -69,7 +81,7 @@ def create_agent(prompt: str | None = None) -> Agent:
     # One working directory per conversation, so this refinement's files stay together
     # and cannot be mixed up with an earlier one's. The trace of the run is written
     # there too, so what the agent did is kept with what it produced.
-    session = start_session()
+    session = start_session(session_id)
     configure_tracing()
 
     with open("examples/NaCoO2/example_refinement_NaCoO2.inp", "r") as f:
@@ -89,25 +101,31 @@ def create_agent(prompt: str | None = None) -> Agent:
     )
     print(f"📝 System prompt: {prompt_name}")
 
+    tools = [
+        list_available_data,
+        read_file,
+        cif_to_topas_str,
+        describe_structure,
+        copy_into_session,
+        save_topas_inp,
+        # run_topas_refinement,
+        run_topas_refinement_remote,
+        check_remote_topas_running,
+        get_optimade_structures,
+        print_structure,
+        print_structures,
+        plot_refinement_results,
+        get_samples,
+        get_sample,
+        list_data_files,
+    ]
+    tools = [t for t in tools if t.__name__ not in (exclude_tools or set())]
+
     # Create the agent with tools
     agent = Agent(
         model,
         system_prompt=system_prompt,
-        tools=[
-            list_available_data,
-            copy_into_session,
-            save_topas_inp,
-            # run_topas_refinement,
-            run_topas_refinement_remote,
-            check_remote_topas_running,
-            get_optimade_structures,
-            print_structure,
-            print_structures,
-            plot_refinement_results,
-            get_samples,
-            get_sample,
-            list_data_files,
-        ],
+        tools=tools,
         model_settings=model_settings,
         instrument=True,
         retries=5,
@@ -269,7 +287,11 @@ async def run_once(
     print("=" * 60)
 
     output = await run_and_show(
-        agent, build_task(pattern, opxrd_pattern, elements, notes), CONTEXT_LIMIT
+        agent,
+        build_task(
+            pattern, elements=elements, opxrd_pattern=opxrd_pattern, notes=notes
+        ),
+        CONTEXT_LIMIT,
     )
     print(output)
     print("=" * 60)
@@ -334,7 +356,11 @@ async def main(args: argparse.Namespace) -> None:
                 else None
             )
             await run_once(
-                args.pattern, elements, args.opxrd_pattern, args.notes, args.prompt
+                args.pattern,
+                elements,
+                notes=args.notes,
+                opxrd_pattern=args.opxrd_pattern,
+                prompt=args.prompt,
             )
         else:
             await chat_loop(args.prompt)
