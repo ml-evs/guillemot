@@ -81,7 +81,12 @@ GUILLEMOT_TOPAS_SSH_HOST=user@topas-pc              # or a ~/.ssh/config host al
 GUILLEMOT_TOPAS_EXE='C:\Science\Topas-7\tc.exe'     # remote path to the TOPAS console exe
 GUILLEMOT_TOPAS_REMOTE_DIR='C:\guillemot_runs'      # remote directory for run directories
 GUILLEMOT_TOPAS_SSH_PORT=22                         # optional, only if non-standard
+GUILLEMOT_TOPAS_SSH_PASSWORD='...'                  # optional; only if the machine won't take your key
 ```
+
+Key authentication is preferred. If a machine only takes a password, set
+`GUILLEMOT_TOPAS_SSH_PASSWORD` and install [`sshpass`](https://sourceforge.net/projects/sshpass/).
+The password reaches `sshpass` through its environment, never the command line.
 
  Given experimental X-ray diffraction data, guillemot will set up and run TOPAS refinements using a natural-language interface. Guillemot uses multimodal image input to inspect refinement outputs, and has tools for retrieving structural information from OPTIMADE providers and outputting refinement plots to images.
 
@@ -89,7 +94,10 @@ GUILLEMOT_TOPAS_SSH_PORT=22                         # optional, only if non-stan
 
 - Local file paths automatically parsed as multimodal input (used by agent to read refinement plots)
 - `save_topas_inp` — Create and save a TOPAS .inp refinement input file; returns the path to the generated .inp.
-- `run_topas_refinement` — Run a TOPAS refinement using a provided .inp and diffraction data; returns paths to result files and logs.
+- `read_file` — Read a text file back with line numbers (an .inp before fixing it, the `.out` of a finished refinement, a CIF, a worked example). Diffraction data comes back as a summary instead (range, step, strongest peaks; Rwp and worst misfits for a refinement output), since reading thousands of numbers by hand is slow and unreliable. Limited to the session directory, `data/`, `cifs/` and `examples/`.
+- `run_topas_refinement` — Run a TOPAS refinement using a provided .inp and diffraction data; returns paths to result files and logs. On success it also reports the Rwp, every refined value as `start -> refined`, and warnings about values that look wrong (parameters at their limits, a broken symmetry constraint, a large jump in the cell, a crystallite size near its 0.3 nm floor, negative beq).
+- `describe_structure` — Report a structure's space group, formula and Z, each site's Wyckoff position, site symmetry and refinable coordinates, the cell contents, and its strongest expected reflections at a given wavelength (spglib + pymatgen), so the agent never derives symmetry by hand.
+- `cif_to_topas_str` — Convert a CIF into a TOPAS `str` block with the space group's constraints (tied lattice parameters, exact special positions, refinable beq), using John Evans's [topas-inp-writer](https://github.com/johnsoevans/topas-inp-writer) converter vendored from datalab-org/guillemot#26.
 - `get_optimade_structures` — Query OPTIMADE providers for crystal structures
   and provide them in context to the agent.
 - `print_structure` — Produce a concise human-readable summary of a single structure for quick inspection.
@@ -111,8 +119,25 @@ guillemot --prompt ~/experiments/terse-with-hkl.md    # a path works too
 
 A prompt is filled in before it is sent: `{{execution}}` becomes the instructions for wherever
 TOPAS is actually running (local, or over SSH — the fragments in `prompts/fragments/`), and
-`{{topas_example}}` becomes the worked NaCoO2 example. Both must appear in any new variant;
+`{{topas_example}}` becomes the worked NaCoO2 example.
+
+`default` carries TOPAS syntax rules checked against the TOPAS 8 Technical Reference, plus a
+working method (one change per attempt, numbered attempts, read the file back before fixing it,
+check refined values after a success). These address what went wrong in the first opXRD
+benchmark runs. `default_v1` is the prompt before those additions, kept for comparison:
+`guillemot-bench run --prompt default_v1 ...`. Both must appear in any new variant;
 leaving one out is an error at start-up rather than a placeholder sent to the model.
+
+## Benchmarking
+
+`guillemot-bench` runs guillemot over the [opXRD](https://zenodo.org/records/15298026)
+database, using fixed train/validation/test/holdout splits. It also exports the same
+tasks for other refinement methods and scores every method identically. See
+[benchmark/README.md](benchmark/README.md).
+
+```shell
+uv run guillemot-bench run --name smoke --entry HKUST/HKUST-A/pattern_4 --mode structure
+```
 
 ## Tracing
 
