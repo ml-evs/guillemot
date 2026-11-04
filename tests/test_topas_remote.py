@@ -1,3 +1,4 @@
+# This file was edited with the assistance of an AI model and requires human review from the contributor.
 """Tests for the SSH-based TOPAS runner.
 
 These exercise the real code paths against stub `ssh`/`scp` executables that emulate
@@ -67,7 +68,11 @@ if inner.startswith("if not exist"):
 if inner.startswith("cd /d"):
     run_dir, exe, inp = re.findall(r'"([^"]+)"', inner)
     assert exe == os.environ["EXPECTED_EXE"], f"unexpected exe {exe}"
-    assert "\\\\" not in inp and "/" not in inp, f"inp should be a bare name: {inp}"
+    # TOPAS 8 resolves a bare .inp name against its install directory, so the .inp
+    # must be named by its full path, inside the run directory.
+    assert inp.lower().startswith(run_dir.lower() + "\\\\"), f"inp not in run dir: {inp}"
+    inp = inp[len(run_dir) + 1 :]
+    assert "\\\\" not in inp and "/" not in inp, f"inp should be directly in run dir: {inp}"
     local_dir = to_local(run_dir)
     os.chdir(local_dir)
 
@@ -281,6 +286,8 @@ def test_data_file_found_outside_run_dir(remote):
 
 def test_refuses_to_start_when_topas_is_busy(remote, monkeypatch):
     monkeypatch.setenv("FAKE_TOPAS_RUNNING", "1")
+    # Busy for longer than we are prepared to wait, which here is not at all.
+    monkeypatch.setattr("guillemot.tools.topas.TOPAS_BUSY_WAIT_S", 0)
 
     status = check_remote_topas_running()
     assert status.running
@@ -303,6 +310,8 @@ def test_reports_idle_remote(remote):
 def test_detects_the_gui_as_well_as_the_console_binary(remote, monkeypatch):
     """TOPAS 6's GUI is ta.exe / ta61.exe, not topas.exe."""
     monkeypatch.setenv("FAKE_TOPAS_GUI_RUNNING", "1")
+    # Busy for longer than we are prepared to wait, which here is not at all.
+    monkeypatch.setattr("guillemot.tools.topas.TOPAS_BUSY_WAIT_S", 0)
 
     status = check_remote_topas_running()
     assert status.running
@@ -398,3 +407,18 @@ def test_failure_without_a_line_number_quotes_nothing(remote, monkeypatch):
         run_topas_refinement_remote("run_dir/KD1.inp", timeout_s=60)
 
     assert "stopped parsing" not in str(excinfo.value)
+
+
+def test_password_goes_through_sshpass_environment_not_argv(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    config = TopasSSHConfig(host="topas@box", password="hunter2")
+    assert config.ssh_cmd[:3] == ["sshpass", "-e", "ssh"]
+    assert "BatchMode=yes" not in config.ssh_cmd
+    assert config.scp_cmd[:3] == ["sshpass", "-e", "scp"]
+    assert "hunter2" not in " ".join(config.ssh_cmd + config.scp_cmd)
+    assert "hunter2" not in repr(config)
+    assert config.subprocess_env["SSHPASS"] == "hunter2"
+
+
+def test_no_password_leaves_environment_alone():
+    assert TopasSSHConfig(host="user@box").subprocess_env is None

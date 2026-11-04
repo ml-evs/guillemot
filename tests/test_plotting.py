@@ -1,3 +1,4 @@
+# This file was edited with the assistance of an AI model and requires human review from the contributor.
 """The plot has to reach the model as an image.
 
 Returning `BinaryContent` nested inside a pydantic model looks like it works — the
@@ -81,3 +82,29 @@ def test_render_returns_a_path_and_no_image(tmp_path):
         save_path
     )
     assert save_path.is_file()
+
+
+def test_concurrent_plots_do_not_collide(tmp_path):
+    """The agent runs tool calls in worker threads; pyplot's mathtext parser is not
+    thread-safe, and three zoomed plots in one turn once ended a benchmark run."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    import numpy as np
+
+    from guillemot.tools.plotting import render_refinement_plot
+
+    x = np.linspace(10, 80, 2000)
+    y = 100 + 1000 * np.exp(-((x - 30) ** 2) / 0.05)
+    output = tmp_path / "riet_01_output.txt"
+    np.savetxt(output, np.column_stack([x, y, y * 0.97]))
+
+    def render(i):
+        return render_refinement_plot(
+            output_file=str(output),
+            save_path=str(tmp_path / f"zoom_{i}.png"),
+            x_range=[20 + i % 5, 60],
+        )
+
+    with ThreadPoolExecutor(8) as pool:
+        paths = list(pool.map(render, range(24)))
+    assert all(pathlib.Path(p).is_file() for p in paths)
