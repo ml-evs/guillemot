@@ -1,0 +1,19 @@
+# Development set: 12 validation entries for iterating on prompts and tools.
+# Stratified by radiation, chemistry and number of phases; one pattern per compound.
+# Run with: guillemot-bench run --name <name> --entries-file benchmark/opxrd/dev.txt
+# Lab Cu Kα doublet
+HKUST/HKUST-A/pattern_4   # PbSe, Fm-3m (rock salt)
+CNRS/pattern_215          # ZnInCuTe, F-43m, mixed cation site
+CNRS/pattern_365          # Li5Fe3(SbO2)3, C2/m, mixed site (label occupancies ambiguous)
+CNRS/pattern_124          # C9NCl, molecular crystal
+# Single wavelength, Cu Kα1
+CNRS/pattern_251          # CaNdFeO3, Pnma perovskite, mixed A site
+CNRS/pattern_311          # Na2HfSi2O7
+CNRS/pattern_240          # H9C10(NO2)2, molecular crystal
+# Synchrotron
+CNRS/pattern_465          # FeSe, P4/nmm, λ = 0.414 Å
+CNRS/pattern_138          # SnSe, λ = 0.500 Å
+CNRS/pattern_588          # H3Pb(C2O)4, metal-organic, λ = 0.825 Å
+# Multi-phase (lab Cu Kα doublet)
+HKUST/HKUST-A/pattern_7   # Li2MnO3 + spinel (spinel label occupancies ambiguous)
+HKUST/HKUST-A/pattern_5   # TiO2 + V2O5 (3 phases)

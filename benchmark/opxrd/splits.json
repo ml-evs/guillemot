@@ -1,0 +1,69 @@
+{
+  "dataset": "opXRD",
+  "zenodo_record": "15298026",
+  "archive_md5": "e8e9800a8ecd2b7f01a764fdf77d5c53",
+  "salt": "guillemot-opxrd-v1",
+  "fractions": {
+    "train": 0.6,
+    "validation": 0.1,
+    "test": 0.2,
+    "holdout": 0.1
+  },
+  "grouping": "reduced formulas of all labelled phases; LBNL in situ series; else entry",
+  "counts": {
+    "none": {
+      "train": {
+        "patterns": 53571,
+        "groups": 12235
+      },
+      "validation": {
+        "patterns": 7631,
+        "groups": 1991
+      },
+      "test": {
+        "patterns": 15923,
+        "groups": 4134
+      },
+      "holdout": {
+        "patterns": 13248,
+        "groups": 2104
+      }
+    },
+    "partial": {
+      "train": {
+        "patterns": 734,
+        "groups": 468
+      },
+      "validation": {
+        "patterns": 123,
+        "groups": 83
+      },
+      "test": {
+        "patterns": 332,
+        "groups": 165
+      },
+      "holdout": {
+        "patterns": 78,
+        "groups": 78
+      }
+    },
+    "structure": {
+      "train": {
+        "patterns": 515,
+        "groups": 352
+      },
+      "validation": {
+        "patterns": 116,
+        "groups": 66
+      },
+      "test": {
+        "patterns": 200,
+        "groups": 131
+      },
+      "holdout": {
+        "patterns": 81,
+        "groups": 71
+      }
+    }
+  }
+}

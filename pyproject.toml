@@ -28,6 +28,7 @@ build-backend = "setuptools.build_meta"
 # Add a "guillemot" entrypoint that launches the app in main
 [project.scripts]
 guillemot = "guillemot.main:launch"
+guillemot-bench = "guillemot.benchmark.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

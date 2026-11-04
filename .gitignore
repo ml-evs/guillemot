@@ -1,5 +1,6 @@
 data/
 run_dir/
+datasets/
 # Python
 __pycache__/
 *.py[cod]
