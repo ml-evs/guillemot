@@ -103,6 +103,26 @@ async def run_and_show(
     `context_limit` is how many tokens the model can hold; without it the context
     meter reports tokens but no percentage.
     """
+    result = await run_and_show_result(agent, message, context_limit)
+    return result.output
+
+
+async def run_and_show_result(
+    agent: Agent,
+    message: Any,
+    context_limit: int | None = None,
+    usage_limits=None,
+    capture: dict | None = None,
+    message_history=None,
+):
+    """As `run_and_show`, but return the whole run result — usage and messages too —
+    for callers that need to account for the run, such as the benchmark harness.
+
+    If `capture` is given, the live run is stored in it under ``"run"`` as soon as it
+    starts, so a caller can still read its usage and messages if the run raises.
+    `message_history` continues an earlier run from where it stopped; `message` may
+    then be None.
+    """
     from pydantic_ai.messages import (
         FunctionToolCallEvent,
         FunctionToolResultEvent,
@@ -132,7 +152,11 @@ async def run_and_show(
             print("\n", flush=True)
             thinking = False
 
-    async with agent.iter(message) as run:
+    async with agent.iter(
+        message, message_history=message_history, usage_limits=usage_limits
+    ) as run:
+        if capture is not None:
+            capture["run"] = run
         async for node in run:
             # Tool calls are handled in their own node, after the request that asked for
             # them: this is where the arguments are complete and the results arrive.
@@ -166,4 +190,4 @@ async def run_and_show(
             _report_context_usage(total - counted, context_limit)
             counted = total
 
-    return run.result.output
+    return run.result
